@@ -85,3 +85,18 @@ func TestRenewOnce(t *testing.T) {
 		t.Fatalf("err %v calls %d", err, calls.Load())
 	}
 }
+
+func TestMetadataHostClusterAnnotation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[{"name":"v","uid":"v1","annotations":{"hostClusterUid":"h1"}},{"name":"h","uid":"h1","annotations":{}},{"name":"n","uid":"n1"}]}`))
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client(), Token: func() (string, error) { return "RT", nil }}
+	m, err := c.Metadata(context.Background())
+	if err != nil || len(m) != 3 {
+		t.Fatalf("%+v %v", m, err)
+	}
+	if m[0].HostUID() != "h1" || m[1].HostUID() != "" || m[2].HostUID() != "" {
+		t.Fatalf("%+v", m)
+	}
+}
