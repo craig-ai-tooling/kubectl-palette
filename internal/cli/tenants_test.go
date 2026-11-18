@@ -59,7 +59,7 @@ func tenantServer(t *testing.T, org, uid string, cluster string) *httptest.Serve
 		case p == "/v1/dashboard/projects":
 			fmt.Fprint(w, `{"items":[{"metadata":{"name":"Default","uid":"p1"}}]}`)
 		case strings.HasSuffix(p, "/assets/kubeconfigclient"):
-			fmt.Fprint(w, oidcKubeconfig)
+			fmt.Fprint(w, oidcKubeconfigFor(srv.URL+"/v1/oidc/tenant/"+uid))
 		default:
 			http.NotFound(w, r)
 		}
@@ -82,6 +82,14 @@ func fakeLogin(orgByClient map[string]string) func(context.Context, oidc.LoginOp
 
 func (h *harness) addEntry(t *testing.T, name string, cfg config.Config, rt, idTag string) {
 	t.Helper()
+	// Each named entry gets its own API token, so the fake can serve cluster files that
+	// trust that entry's issuer, as a real tenant does.
+	if rt == "rt-0" {
+		rt = "rt-0-" + name
+	}
+	h.f.mu.Lock()
+	h.f.issuers[rt] = cfg.Issuer
+	h.f.mu.Unlock()
 	p := h.a.Paths.Root().ForTenant(name)
 	if err := p.Save(cfg); err != nil {
 		t.Fatal(err)
@@ -558,6 +566,9 @@ func TestLegacyFlatStateNeedsNoMigration(t *testing.T) {
 	if root.Active() != "default" {
 		t.Fatalf("active %q", root.Active())
 	}
+	h.f.mu.Lock()
+	h.f.issuers["rt-0"] = newIss.URL // the clusters trust the issuer just logged in to
+	h.f.mu.Unlock()
 	if code, out, _ := h.run("use", "alpha", "--print-env"); code != 0 || !strings.Contains(out, filepath.Join(root.KubeDir, "Default", "alpha.yaml")) {
 		t.Fatalf("%d %s", code, out)
 	}

@@ -272,6 +272,16 @@ func (a *App) loginServer(ctx context.Context, root config.Paths, f loginFlags) 
 	}
 	name := f.name
 	if name == "" {
+		// Logging in again to a tenant that already has an entry reuses that entry, whatever
+		// it is called, so one tenant never ends up with two sessions by accident.
+		for _, e := range root.Entries() {
+			if old, err := root.ForTenant(e).Load(); err == nil && sameIssuer(old.Issuer, cfg.Issuer) {
+				name = e
+				break
+			}
+		}
+	}
+	if name == "" {
 		name = res.Org
 	}
 	if name != "" {

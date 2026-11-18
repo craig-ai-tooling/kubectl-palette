@@ -505,6 +505,23 @@ func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin, refr
 // errNoOIDC means Palette has no OIDC kubeconfig for the cluster.
 var errNoOIDC = errors.New("no OIDC configured")
 
+// errOtherIssuer means a cluster's OIDC setup names an identity provider other than the
+// Palette tenant this entry is logged in to.
+var errOtherIssuer = errors.New("this cluster uses a different identity provider than your Palette login, which this version does not support")
+
+// sameIssuer compares two issuer URLs, ignoring a trailing slash.
+func sameIssuer(a, b string) bool {
+	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
+}
+
+// issuerHost is the host of an issuer URL, for messages. The path can hold a tenant UID.
+func issuerHost(issuer string) string {
+	if u, err := url.Parse(issuer); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return "unknown issuer"
+}
+
 // fetchOIDC downloads a cluster's OIDC kubeconfig and rewrites it so it holds no secret.
 // It writes nothing and is safe to call from several goroutines.
 func (a *App) fetchOIDC(ctx context.Context, cl *palette.Client, c index.Cluster) ([]byte, error) {
@@ -519,7 +536,12 @@ func (a *App) fetchOIDC(ctx context.Context, cl *palette.Client, c index.Cluster
 	if err != nil {
 		return nil, err
 	}
-	o, _ := kubeconfig.ParseOIDC(raw)
+	o, perr := kubeconfig.ParseOIDC(raw)
+	// The token this plugin hands out comes from the Palette login. A cluster that trusts
+	// another identity provider would reject it, so never point such a cluster at it.
+	if perr == nil && !sameIssuer(o.Issuer, cfg.Issuer) {
+		return nil, fmt.Errorf("%s: %w (%s). Use the kubeconfig from Palette for it", c.Ref(), errOtherIssuer, issuerHost(o.Issuer))
+	}
 	raw, err = kubeconfig.Rewrite(raw, kubeconfig.RewriteOptions{Tenant: a.Paths.Entry(), Secrets: []string{cfg.ClientSecret, o.ClientSecret}})
 	if err != nil {
 		return nil, fmt.Errorf("rewrite kubeconfig for %s: %w", c.Ref(), err)

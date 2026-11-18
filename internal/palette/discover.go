@@ -240,7 +240,7 @@ func Resolve(ctx context.Context, hc *http.Client, server, tenant string) (Resol
 		root, err := FetchOrg(ctx, hc, base)
 		if err != nil {
 			if errors.Is(err, ErrTenantNotFound) {
-				return res, fmt.Errorf("%s does not know this tenant host: check --server", base)
+				return res, fmt.Errorf("%s did not answer as a Palette tenant host: check --server", base)
 			}
 			return res, err
 		}

@@ -38,6 +38,11 @@ users:
       args: [oidc-login, get-token, --oidc-issuer-url=https://i, --oidc-client-id=T, --oidc-client-secret=TOPSECRET]
 `
 
+// oidcKubeconfigFor is oidcKubeconfig as a cluster that trusts the given issuer would serve it.
+func oidcKubeconfigFor(issuer string) string {
+	return strings.Replace(oidcKubeconfig, "--oidc-issuer-url=https://i,", "--oidc-issuer-url="+issuer+",", 1)
+}
+
 func jwtExp(exp time.Time, tag string) string {
 	e := base64.RawURLEncoding
 	return e.EncodeToString([]byte(`{"alg":"none"}`)) + "." + e.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d,"t":%q}`, exp.Unix(), tag))) + ".s"
@@ -54,10 +59,11 @@ type fakePalette struct {
 	delay     time.Duration   // held by every kubeconfig download, to overlap them
 	cur, max  int             // kubeconfig downloads in flight now and at most
 	tokenBody string
+	issuers   map[string]string // API token -> issuer its clusters trust; default https://i
 }
 
 func newFakePalette(t *testing.T) *fakePalette {
-	f := &fakePalette{hits: map[string]int{}, noOIDC: map[string]bool{}, fail: map[string]bool{}}
+	f := &fakePalette{hits: map[string]int{}, noOIDC: map[string]bool{}, fail: map[string]bool{}, issuers: map[string]string{}}
 	f.clusters = `[
 	 {"name":"alpha","uid":"ua","annotations":{"projectUid":"p1","permissions":"cluster.get,cluster.adminKubeconfigDownload"}},
 	 {"name":"beta","uid":"ub","annotations":{"projectUid":"p1","permissions":"cluster.get"}},
@@ -77,7 +83,7 @@ func newFakePalette(t *testing.T) *fakePalette {
 			json.NewEncoder(w).Encode(map[string]any{"access_token": "a", "token_type": "Bearer", "refresh_token": "rt-new",
 				"id_token": jwtExp(time.Now().Add(time.Hour), "refreshed")})
 			return
-		case r.Header.Get("Authorization") != "rt-0" && r.Header.Get("Authorization") != "rt-new":
+		case !strings.HasPrefix(r.Header.Get("Authorization"), "rt-0") && r.Header.Get("Authorization") != "rt-new":
 			w.WriteHeader(401)
 		case r.URL.Path == "/v1/dashboard/spectroclusters/metadata":
 			fmt.Fprintf(w, `{"items":%s}`, clusters)
@@ -102,7 +108,13 @@ func newFakePalette(t *testing.T) *fakePalette {
 				w.WriteHeader(400)
 				return
 			}
-			fmt.Fprint(w, oidcKubeconfig)
+			f.mu.Lock()
+			iss := f.issuers[r.Header.Get("Authorization")]
+			f.mu.Unlock()
+			if iss == "" {
+				iss = "https://i"
+			}
+			fmt.Fprint(w, oidcKubeconfigFor(iss))
 		case strings.HasSuffix(r.URL.Path, "/assets/adminKubeconfig"):
 			fmt.Fprint(w, "apiVersion: v1\nusers:\n- name: a\n  user: {client-certificate-data: Q0VSVA==}\n")
 		default:

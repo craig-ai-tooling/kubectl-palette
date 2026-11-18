@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -672,5 +673,57 @@ func TestLoginHeadlessAndPasteBack(t *testing.T) {
 	h.mustRun(t, "login", "--no-contexts", "--no-browser")
 	if got.OpenBrowser != nil {
 		t.Fatal("--no-browser opened a browser")
+	}
+}
+
+// A cluster whose OIDC setup names another identity provider must not be pointed at the
+// Palette token: no cluster file, no context, and an error that says why.
+func TestClusterWithAnotherIssuerIsRefused(t *testing.T) {
+	h := newHarness(t, time.Now().Add(time.Hour))
+	h.f.mu.Lock()
+	h.f.issuers["rt-0"] = "https://login.idp.example.com/tenant-a"
+	h.f.mu.Unlock()
+	code, out, errs := h.run("use", "alpha", "--print-env")
+	if code == 0 {
+		t.Fatalf("use succeeded: %s", out)
+	}
+	if !strings.Contains(errs, "different identity provider") || !strings.Contains(errs, "login.idp.example.com") {
+		t.Fatalf("stderr = %q", errs)
+	}
+	if strings.Contains(errs, "tenant-a") {
+		t.Errorf("the message shows the issuer path: %q", errs)
+	}
+	if _, err := os.Stat(filepath.Join(h.a.Paths.KubeDir, "Default", "alpha.yaml")); err == nil {
+		t.Error("a cluster file was written for a cluster with another issuer")
+	}
+	if n := h.contextNames(t); len(n) != 0 {
+		t.Errorf("contexts recorded: %v", n)
+	}
+	// A trailing slash is the same issuer.
+	h.f.mu.Lock()
+	h.f.issuers["rt-0"] = "https://i/"
+	h.f.mu.Unlock()
+	if code, _, errs := h.run("use", "alpha", "--print-env"); code != 0 {
+		t.Fatalf("trailing slash issuer refused: %s", errs)
+	}
+}
+
+// Logging in with --server to a tenant that already has an entry reuses that entry.
+func TestServerLoginReusesTheEntryOfTheSameIssuer(t *testing.T) {
+	h := newHarness(t, time.Now().Add(time.Hour))
+	acme := tenantServer(t, "acme", uidAcme, "alpha")
+	h.a.Login = fakeLogin(map[string]string{uidAcme: "acme"})
+	h.a.HTTP = acme.Client()
+	// The same tenant is already saved under another name.
+	h.mustRun(t, "login", "--server", acme.URL, "--name", "work", "--no-contexts")
+	h.mustRun(t, "login", "--server", acme.URL, "--no-contexts")
+	got := h.a.Paths.Root().Entries()
+	for _, e := range got {
+		if e == "acme" {
+			t.Fatalf("a second entry was created for the same tenant: %v", got)
+		}
+	}
+	if h.a.Paths.Root().Active() != "work" {
+		t.Fatalf("active %q, entries %v", h.a.Paths.Root().Active(), got)
 	}
 }
