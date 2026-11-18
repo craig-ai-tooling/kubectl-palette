@@ -35,6 +35,13 @@ type ClusterMeta struct {
 	Deletion    string
 }
 
+// HostClusterAnnotation is set on a virtual cluster. Its value is the UID of the cluster
+// that hosts it.
+const HostClusterAnnotation = "hostClusterUid"
+
+// HostUID returns the UID of the hosting cluster, empty for a cluster that is not virtual.
+func (m ClusterMeta) HostUID() string { return strings.TrimSpace(m.Annotations[HostClusterAnnotation]) }
+
 // Project is a project's uid and name.
 type Project struct {
 	UID  string

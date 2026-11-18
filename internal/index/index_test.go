@@ -3,7 +3,9 @@ package index
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -129,5 +131,110 @@ func TestSaveLoadStale(t *testing.T) {
 	}
 	if got.Stale(time.Now()) || !got.Stale(time.Now().Add(11*time.Minute)) {
 		t.Fatal("stale threshold wrong")
+	}
+}
+
+func virtualSample() *Index {
+	src := fakeSrc{
+		metas: []palette.ClusterMeta{
+			meta("host", "h1", "p1", "", nil, ""),
+			meta("v1", "v1", "p1", "", map[string]string{"hostClusterUid": "h1"}, ""),
+			meta("v2", "v2", "p2", "", map[string]string{"hostClusterUid": "h1"}, ""),
+			meta("lost", "v3", "p1", "", map[string]string{"hostClusterUid": "missing"}, ""),
+			meta("plain", "c1", "p1", "", nil, ""),
+		},
+		projects: []palette.Project{{UID: "p1", Name: "Default"}, {UID: "p2", Name: "Dev"}},
+	}
+	i, _ := Build(context.Background(), src, time.Now())
+	return i
+}
+
+func TestBuildMarksVirtualClusters(t *testing.T) {
+	i := virtualSample()
+	got := map[string]Cluster{}
+	for _, c := range i.Clusters {
+		got[c.Name] = c
+	}
+	for _, n := range []string{"v1", "v2"} {
+		if !got[n].Virtual() || got[n].HostUID != "h1" || got[n].Host != "Default/host" {
+			t.Errorf("%s: %+v", n, got[n])
+		}
+	}
+	if !got["lost"].Virtual() || got["lost"].HostUID != "missing" || got["lost"].Host != "" {
+		t.Errorf("lost: %+v", got["lost"])
+	}
+	for _, n := range []string{"host", "plain"} {
+		if got[n].Virtual() || got[n].Host != "" {
+			t.Errorf("%s marked virtual: %+v", n, got[n])
+		}
+	}
+}
+
+func TestFilter(t *testing.T) {
+	i := virtualSample()
+	v := i.Filter(Cluster.Virtual)
+	if len(v.Clusters) != 3 || !v.UpdatedAt.Equal(i.UpdatedAt) {
+		t.Fatalf("%+v", v)
+	}
+	if len(i.Clusters) != 5 {
+		t.Fatal("original changed")
+	}
+	if n := i.Filter(func(Cluster) bool { return false }); len(n.Clusters) != 0 {
+		t.Fatalf("%+v", n)
+	}
+}
+
+func TestHostedBy(t *testing.T) {
+	i := virtualSample()
+	got, err := i.HostedBy("host")
+	if err != nil || len(got.Clusters) != 2 || got.Clusters[0].Name != "v1" || got.Clusters[1].Name != "v2" {
+		t.Fatalf("hit: %+v %v", got, err)
+	}
+	got, err = i.HostedBy("Default/plain")
+	if err != nil || len(got.Clusters) != 0 {
+		t.Fatalf("no virtual clusters: %+v %v", got, err)
+	}
+	if _, err := i.HostedBy("nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown host: %v", err)
+	}
+}
+
+func TestVirtualFieldsRoundTrip(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "i.json")
+	i := virtualSample()
+	if err := i.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n, c := range got.Clusters {
+		if !reflect.DeepEqual(c, i.Clusters[n]) {
+			t.Fatalf("cluster %d: %+v vs %+v", n, c, i.Clusters[n])
+		}
+	}
+	h, _ := got.HostedBy("host")
+	if len(h.Clusters) != 2 {
+		t.Fatalf("%+v", h)
+	}
+}
+
+func TestLoadOldFormatIndex(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "old.json")
+	old := `{"updated_at":"2026-11-01T00:00:00Z","clusters":[{"name":"a","uid":"u","project_uid":"p","project":"Default","permissions":["x"],"no_oidc":true}]}`
+	if err := os.WriteFile(p, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(p)
+	if err != nil || len(got.Clusters) != 1 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	c := got.Clusters[0]
+	if c.Virtual() || c.HostUID != "" || c.Host != "" || !c.NoOIDC {
+		t.Fatalf("%+v", c)
+	}
+	if h, err := got.HostedBy("a"); err != nil || len(h.Clusters) != 0 {
+		t.Fatalf("%+v %v", h, err)
 	}
 }

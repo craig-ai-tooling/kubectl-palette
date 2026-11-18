@@ -5,7 +5,7 @@ Cursor, Codex, or a human). Read this first. Everything else loads on demand.
 
 ## Why
 
-kubectl-palette is a kubectl plugin for Spectro Cloud Palette. A user logs in once in a browser through Palette's OIDC provider, names a cluster, and plain kubectl in that terminal runs against it, with no kube contexts to manage. It keeps a local index of cluster names so it stays fast for one cluster or a thousand, and fetches a kubeconfig only the first time a cluster is used. It is a prototype to test the experience and propose it to Spectro Cloud engineering as a product feature; the first target user is a platform team replacing Tanzu's kubectl vsphere login.
+kubectl-palette is a kubectl plugin for Spectro Cloud Palette. A user logs in once in a browser through Palette's OIDC provider, names a cluster, and plain kubectl in that terminal runs against it. Every OIDC cluster it reaches also becomes a context in the user's kubeconfig, so `kubectl --context` works in any terminal. It keeps a local index of cluster names so it stays fast for one cluster or a thousand, and fetches a kubeconfig only the first time a cluster is used. It is a prototype to test the experience and propose it to Spectro Cloud engineering as a product feature; the first target user is a platform team replacing Tanzu's kubectl vsphere login.
 
 ---
 
@@ -14,7 +14,7 @@ kubectl-palette is a kubectl plugin for Spectro Cloud Palette. A user logs in on
 | Path | What lives here |
 |---|---|
 | `cmd/kubectl-palette/` | CLI entry point |
-| `internal/` | Application packages (index, config, token store, completion, picker) |
+| `internal/` | Application packages (index, config, token store, completion, picker, kubectx for the context file) |
 | `deploy/krew/` | Krew manifest template, filled by `hack/krew-manifest.sh` |
 | `.goreleaser.yaml` | Release builds; snapshot check: `goreleaser release --snapshot --clean` |
 | `internal/**/*_test.go` | Test suites |
@@ -74,7 +74,7 @@ Do not read all of these. Read the one that matches what you are about to change
 | Touching… | Read |
 |---|---|
 | Commands, UX, auth flow, speed budget, open questions | `docs/design.md` |
-| Tokens, kubeconfigs, file paths, TLS, logging | `docs/security.md` |
+| Tokens, kubeconfigs, the context file, file paths, TLS, logging | `docs/security.md` |
 | Anything at all | this file |
 
 ---
@@ -130,4 +130,4 @@ in a PR — that is a code change with a review, which is the point.
 - **Never invent a requirement.** Unknown → `NEEDS CLARIFICATION` → ask.
 - **Never leave the tree broken.** Build + test + lint green before you commit.
 - **Prefer editing over creating.** A new file needs a reason.
-- **Never write a token or secret into a kubeconfig, and never touch `~/.kube/config`.** See `docs/security.md`.
+- **Never write a token or secret into a kubeconfig.** The user's `~/.kube/config` gains only the exec-credential contexts `internal/kubectx` records, and never admin credentials. Tests must keep every context file inside `t.TempDir()`. See `docs/security.md`.

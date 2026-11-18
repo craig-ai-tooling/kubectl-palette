@@ -22,7 +22,7 @@
 - [ ] Read the relevant `docs/` file for this change
 - [ ] No secret added
 - [ ] No hook disabled or bypassed
-- [ ] No token or secret written to a kubeconfig; `~/.kube/config` untouched
+- [ ] No token or secret written to a kubeconfig; the context file only gains exec-credential users the registry owns
 - [ ] If auth touched: `logout` removes the token cache and any admin kubeconfig
 
 ## NEEDS CLARIFICATION

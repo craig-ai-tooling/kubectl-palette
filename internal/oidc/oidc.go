@@ -3,6 +3,7 @@
 package oidc
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -13,6 +14,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
@@ -146,6 +149,47 @@ type LoginOptions struct {
 	Out         io.Writer
 	OpenBrowser func(url string) error // nil prints only
 	Timeout     time.Duration
+	// In, when set, lets the user paste the redirected address back into the terminal.
+	// Nil disables the paste path.
+	In io.Reader
+	// Hint is extra text printed after the URL, such as an ssh port-forward command.
+	Hint string
+}
+
+// Headless reports whether a browser is unlikely to be available on this machine. The
+// caller uses it to skip opening one. goos is runtime.GOOS and getenv is os.Getenv.
+func Headless(goos string, getenv func(string) string) bool {
+	if getenv("SSH_CONNECTION") != "" || getenv("SSH_TTY") != "" {
+		return true
+	}
+	switch goos {
+	case "darwin", "windows":
+		return false
+	}
+	return getenv("DISPLAY") == "" && getenv("WAYLAND_DISPLAY") == ""
+}
+
+// parsePasted reads a pasted line as a full redirect URL or a bare query string.
+func parsePasted(line string) (url.Values, bool) {
+	line = strings.Trim(strings.TrimSpace(line), "\"'<>")
+	if line == "" {
+		return nil, false
+	}
+	raw := line
+	if strings.Contains(line, "://") {
+		u, err := url.Parse(line)
+		if err != nil {
+			return nil, false
+		}
+		raw = u.RawQuery
+	} else if i := strings.Index(line, "?"); i >= 0 {
+		raw = line[i+1:]
+	}
+	q, err := url.ParseQuery(raw)
+	if err != nil || (q.Get("code") == "" && q.Get("error") == "") {
+		return nil, false
+	}
+	return q, true
 }
 
 func randomString() (string, error) {
@@ -249,6 +293,14 @@ func Login(ctx context.Context, o LoginOptions) (session.Session, config.Config,
 	defer srv.Close()
 
 	fmt.Fprintf(o.Out, "Open this URL to log in:\n%s\n", authURL)
+	if o.Hint != "" {
+		fmt.Fprintf(o.Out, "%s\n", o.Hint)
+	}
+	if o.In != nil {
+		fmt.Fprint(o.Out, "No browser on this machine? Open the URL in a browser on any machine.\n"+
+			"After you log in, the browser goes to a localhost address that may fail to load.\n"+
+			"Copy that full address from the address bar, paste it here and press Enter.\n")
+	}
 	if o.OpenBrowser != nil {
 		if err := o.OpenBrowser(authURL); err != nil {
 			fmt.Fprintf(o.Out, "Could not open a browser (%v). Open the URL yourself.\n", err)
@@ -259,13 +311,60 @@ func Login(ctx context.Context, o LoginOptions) (session.Session, config.Config,
 	if timeout == 0 {
 		timeout = 5 * time.Minute
 	}
+	var lines chan string
+	done := make(chan struct{})
+	defer close(done)
+	if o.In != nil {
+		lines = make(chan string)
+		go func() {
+			sc := bufio.NewScanner(o.In)
+			sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				if !sc.Scan() {
+					return
+				}
+				select {
+				case lines <- sc.Text():
+				case <-done:
+					return
+				}
+			}
+		}()
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	var res result
-	select {
-	case res = <-resCh:
-	case <-time.After(timeout):
-		return session.Session{}, cfg, errors.New("login timed out waiting for the browser")
-	case <-ctx.Done():
-		return session.Session{}, cfg, ctx.Err()
+wait:
+	for {
+		select {
+		case res = <-resCh:
+			break wait
+		case line := <-lines:
+			q, ok := parsePasted(line)
+			switch {
+			case !ok:
+				fmt.Fprintln(o.Out, "That did not look like the login address. Paste the full address from the browser, it contains code= and state=.")
+			case q.Get("state") != state:
+				fmt.Fprintln(o.Out, "That address is from a different login attempt (state does not match). Paste the one from the URL you just opened.")
+			case q.Get("error") != "":
+				res = result{err: errors.New("issuer returned error " + q.Get("error"))}
+				break wait
+			case q.Get("code") == "":
+				fmt.Fprintln(o.Out, "That address had no code. Paste the full address from the browser.")
+			default:
+				res = result{code: q.Get("code")}
+				break wait
+			}
+		case <-timer.C:
+			return session.Session{}, cfg, errors.New("login timed out waiting for the browser")
+		case <-ctx.Done():
+			return session.Session{}, cfg, ctx.Err()
+		}
 	}
 	if res.err != nil {
 		return session.Session{}, cfg, res.err

@@ -126,3 +126,169 @@ func TestConfigRoundTripAndEnv(t *testing.T) {
 		t.Fatalf("validate: %v", err)
 	}
 }
+
+func TestValidEntryName(t *testing.T) {
+	for _, tc := range []struct {
+		in string
+		ok bool
+	}{
+		{"acme", true}, {"acme-2.prod_x", true}, {"Acme", false}, {"ACME", false}, {"acme.", false}, {"acme..", false}, {"a", true}, {strings.Repeat("a", 63), true},
+		{"default", false}, {"", false}, {".hidden", false}, {"-x", false}, {"a/b", false}, {"..", false},
+		{"a b", false}, {strings.Repeat("a", 64), false}, {".tenants", false}, {"a\x00b", false},
+	} {
+		if err := ValidEntryName(tc.in); (err == nil) != tc.ok {
+			t.Errorf("ValidEntryName(%q) = %v, want ok=%v", tc.in, err, tc.ok)
+		}
+	}
+}
+
+func TestForTenantLayout(t *testing.T) {
+	root := Paths{Home: "/h", KubeDir: "/k"}
+	def := root.ForTenant("default")
+	if def.Home != "/h" || def.KubeDir != "/k" || def.Entry() != "default" || def.SessionFile() != "/h/session.json" {
+		t.Fatalf("%+v", def)
+	}
+	if got := root.ForTenant("").ConfigFile(); got != "/h/config.json" {
+		t.Fatal(got)
+	}
+	acme := root.ForTenant("acme")
+	if acme.Home != "/h/tenants/acme" || acme.KubeDir != "/k/.tenants/acme" || acme.Entry() != "acme" {
+		t.Fatalf("%+v", acme)
+	}
+	if acme.IndexFile() != "/h/tenants/acme/index.json" || acme.SessionLock() != "/h/tenants/acme/session.lock" {
+		t.Fatal("entry files are not under the entry directory")
+	}
+	// Selecting from an already-selected Paths starts from the root again.
+	if got := acme.ForTenant("globex"); got.Home != "/h/tenants/globex" || got.Root().Home != "/h" {
+		t.Fatalf("%+v", got)
+	}
+	if acme.ActiveFile() != "/h/active" {
+		t.Fatal(acme.ActiveFile())
+	}
+	got, err := acme.ClusterFile("proj", "c1", true)
+	if err != nil || got != "/k/.tenants/acme/proj/.admin/c1.yaml" {
+		t.Fatalf("%q %v", got, err)
+	}
+	// A project cannot be named like the reserved directory, so the layouts never collide.
+	if _, err := root.ClusterFile(".tenants", "c", false); err == nil {
+		t.Error("project .tenants accepted")
+	}
+}
+
+func TestEntriesAndActive(t *testing.T) {
+	root := Paths{Home: t.TempDir(), KubeDir: t.TempDir()}
+	if got := root.Entries(); len(got) != 0 {
+		t.Fatal(got)
+	}
+	c := Config{Issuer: "i", ClientID: "c", APIURL: "a"}
+	for _, n := range []string{"globex", "default", "acme"} {
+		if err := root.ForTenant(n).Save(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory with no config is not an entry.
+	os.MkdirAll(filepath.Join(root.Home, TenantsDir, "empty"), 0o700)
+	if got := strings.Join(root.Entries(), ","); got != "default,acme,globex" {
+		t.Fatal(got)
+	}
+	if root.Active() != "" {
+		t.Fatal("active before set")
+	}
+	if err := root.SetActive("acme"); err != nil || root.Active() != "acme" {
+		t.Fatal(err)
+	}
+	if err := root.ForTenant("globex").ClearActive(); err != nil || root.Active() != "" {
+		t.Fatal("ClearActive")
+	}
+	if err := root.ClearActive(); err != nil {
+		t.Fatal("clearing twice must not fail:", err)
+	}
+	if err := root.RemoveEntry("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.RemoveEntry("default"); err == nil {
+		t.Fatal("RemoveEntry must refuse the default entry")
+	}
+	if got := strings.Join(root.Entries(), ","); got != "default,globex" {
+		t.Fatal(got)
+	}
+}
+
+func TestConfigNewFieldsRoundTripAndOmitEmpty(t *testing.T) {
+	p := Paths{Home: t.TempDir()}
+	c := Config{Issuer: "i", ClientID: "c", APIURL: "a", Org: "acme", Server: "https://s", CAFile: "/ca.pem"}
+	if err := p.Save(c); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := p.Load(); err != nil || got != c {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if err := p.Save(Config{Issuer: "i", ClientID: "c", APIURL: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p.ConfigFile())
+	for _, k := range []string{"org", "server", "ca_file"} {
+		if strings.Contains(string(b), `"`+k+`"`) {
+			t.Errorf("%s must be omitted when empty:\n%s", k, b)
+		}
+	}
+}
+
+func TestContextFileResolution(t *testing.T) {
+	h := t.TempDir()
+	get := func(env map[string]string) func(string) string {
+		return func(k string) string { return env[k] }
+	}
+	// A redirected kube dir keeps the context file inside it.
+	p, err := DefaultPaths(get(map[string]string{EnvHome: h, EnvKubeDir: h + "/k"}))
+	if err != nil || p.ContextFile() != h+"/k/contexts.yaml" {
+		t.Fatalf("redirected: %q %v", p.ContextFile(), err)
+	}
+	// An explicit file wins.
+	p, err = DefaultPaths(get(map[string]string{EnvHome: h, EnvKubeDir: h + "/k", EnvContextFile: h + "/x.yaml"}))
+	if err != nil || p.ContextFile() != h+"/x.yaml" {
+		t.Fatalf("explicit: %q %v", p.ContextFile(), err)
+	}
+	// Nothing set: the user's kubeconfig.
+	p, err = DefaultPaths(get(nil))
+	if err != nil || !strings.HasSuffix(filepath.ToSlash(p.ContextFile()), "/.kube/config") {
+		t.Fatalf("default: %q %v", p.ContextFile(), err)
+	}
+	// The file survives Root and ForTenant, and the registry is shared by every entry.
+	q := p.ForTenant("acme")
+	if q.ContextFile() != p.ContextFile() || q.Root().ContextFile() != p.ContextFile() {
+		t.Fatalf("context file lost: %q", q.ContextFile())
+	}
+	if q.ContextRegistry() != p.ContextRegistry() || filepath.Base(p.ContextRegistry()) != "contexts.json" {
+		t.Fatalf("registry %q vs %q", q.ContextRegistry(), p.ContextRegistry())
+	}
+	// A hand-built Paths has no context file.
+	if (Paths{Home: h, KubeDir: h}).ContextFile() != "" {
+		t.Fatal("hand-built Paths must not name a context file")
+	}
+}
+
+func TestIssuerID(t *testing.T) {
+	a := IssuerID("https://p.example.test/v1/oidc/tenant/abc")
+	if len(a) != 16 || strings.Trim(a, "0123456789abcdef") != "" {
+		t.Fatalf("id %q", a)
+	}
+	if a != IssuerID("https://p.example.test/v1/oidc/tenant/abc/") || a != IssuerID("https://p.example.test/v1/oidc/tenant/abc//") {
+		t.Fatal("trailing slashes must not change the id")
+	}
+	if a == IssuerID("https://p.example.test/v1/oidc/tenant/abd") {
+		t.Fatal("different issuers share an id")
+	}
+}
+
+func TestMatchEntry(t *testing.T) {
+	entries := []string{"default", "acme"}
+	for in, want := range map[string]string{"acme": "acme", "ACME": "acme", "Default": "default"} {
+		if got, ok := MatchEntry(entries, in); !ok || got != want {
+			t.Errorf("%q -> %q %v", in, got, ok)
+		}
+	}
+	if _, ok := MatchEntry(entries, "other"); ok {
+		t.Error("matched a missing entry")
+	}
+}

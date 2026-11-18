@@ -8,9 +8,13 @@ import (
 	"syscall"
 )
 
-// SpawnBackgroundSync starts `<self> sync --background` detached from this process.
-func SpawnBackgroundSync(self string) error {
-	cmd := exec.Command(self, "sync", "--background")
+// SpawnBackgroundSync starts `<self> sync --background [--tenant <name>]` detached from this process.
+func SpawnBackgroundSync(self, tenant string) error {
+	args := []string{"sync", "--background"}
+	if tenant != "" {
+		args = append(args, "--tenant", tenant)
+	}
+	cmd := exec.Command(self, args...)
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		return err

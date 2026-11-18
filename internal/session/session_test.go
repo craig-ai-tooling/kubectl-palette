@@ -226,3 +226,55 @@ func (b *blockingRefresher) Refresh(_ context.Context, _ string) (string, string
 	<-b.gate
 	return jwt(b.now.Add(time.Hour), "new"), "rt-1", nil
 }
+
+func staleSetup(t *testing.T, left time.Duration, err error) (*Manager, *fakeRefresher, string) {
+	now := time.Now()
+	fr := &fakeRefresher{now: now, current: "rt-0", err: err}
+	m := newMgr(t, fr, now)
+	id := jwt(now.Add(left), "old")
+	if e := m.Save(Session{IDToken: id, RefreshToken: "rt-0", IDExpiry: now.Add(left)}); e != nil {
+		t.Fatal(e)
+	}
+	return m, fr, id
+}
+
+func TestRefreshNetworkErrorInsideMarginUsesCachedToken(t *testing.T) {
+	m, fr, id := staleSetup(t, 30*time.Second, errors.New("dial tcp: connection refused"))
+	got, exp, err := m.IDToken(context.Background())
+	if err != nil || got != id {
+		t.Fatalf("got %q err %v", got, err)
+	}
+	if exp.IsZero() || fr.calls.Load() != 1 {
+		t.Fatalf("exp %v calls %d", exp, fr.calls.Load())
+	}
+}
+
+func TestRefreshNetworkErrorAfterExpiryFails(t *testing.T) {
+	m, _, _ := staleSetup(t, -time.Minute, errors.New("dial tcp: connection refused"))
+	if _, _, err := m.IDToken(context.Background()); err == nil {
+		t.Fatal("expired token must return the error")
+	}
+}
+
+func TestRefreshNetworkErrorInsideSafetyMarginFails(t *testing.T) {
+	m, _, _ := staleSetup(t, 5*time.Second, errors.New("timeout"))
+	if _, _, err := m.IDToken(context.Background()); err == nil {
+		t.Fatal("token inside the 10 s safety margin must return the error")
+	}
+}
+
+func TestRefreshSessionGoneInsideMarginFails(t *testing.T) {
+	m, _, _ := staleSetup(t, 30*time.Second, ErrSessionGone)
+	_, _, err := m.IDToken(context.Background())
+	if !errors.Is(err, ErrSessionGone) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSuccessfulRefreshStillReplacesToken(t *testing.T) {
+	m, _, old := staleSetup(t, 30*time.Second, nil)
+	got, _, err := m.IDToken(context.Background())
+	if err != nil || got == old {
+		t.Fatalf("token not replaced: %v", err)
+	}
+}

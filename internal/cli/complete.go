@@ -12,6 +12,7 @@ import (
 
 	"github.com/craig-ai-tooling/kubectl-palette/internal/complete"
 	"github.com/craig-ai-tooling/kubectl-palette/internal/index"
+	"github.com/craig-ai-tooling/kubectl-palette/internal/kubectx"
 )
 
 // CompleterName is the executable kubectl runs to complete plugin arguments.
@@ -28,11 +29,43 @@ func IsCompleterName(argv0 string) bool {
 // then ":<directive>". It reads only the index file. Errors are swallowed on purpose:
 // a completion failure must never print into the user's command line.
 func (a *App) complete(words []string) {
-	idx, err := index.Load(a.Paths.IndexFile())
-	if err != nil {
-		idx = nil
+	root := a.Paths.Root()
+	// The cluster names come from the entry the command line selects: its --tenant, else
+	// the usual selection. Any failure leaves the index empty.
+	flagVal, hostVal := "", ""
+	for i, w := range words[:max(len(words)-1, 0)] {
+		if v, ok := strings.CutPrefix(w, "--tenant="); ok {
+			flagVal = v
+		} else if w == "--tenant" && i+1 < len(words)-1 {
+			flagVal = words[i+1]
+		}
+		if v, ok := strings.CutPrefix(w, "--host="); ok {
+			hostVal = v
+		} else if w == "--host" && i+1 < len(words)-1 {
+			hostVal = words[i+1]
+		}
 	}
-	out := complete.Complete(idx, words)
+	var idx *index.Index
+	if name, err := a.pickEntry(flagVal); err == nil {
+		if i, err := index.Load(root.ForTenant(name).IndexFile()); err == nil {
+			idx = i
+		}
+	}
+	// After --host <cluster>, only the virtual clusters that cluster hosts are offered.
+	if idx != nil && hostVal != "" {
+		if sub, err := idx.HostedBy(hostVal); err == nil {
+			idx = sub
+		}
+	}
+	var ctxNames []string
+	if len(words) > 2 && words[0] == "contexts" && words[1] == "remove" && a.Paths.ContextFile() != "" {
+		if recs, err := kubectx.ListFor(a.Paths.ContextFile(), a.Paths.ContextRegistry()); err == nil {
+			for _, r := range recs {
+				ctxNames = append(ctxNames, r.Context)
+			}
+		}
+	}
+	out := complete.CompleteAll(idx, root.Entries(), ctxNames, words)
 	var b strings.Builder
 	for _, s := range out {
 		b.WriteString(s)

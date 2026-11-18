@@ -25,6 +25,10 @@ import (
 // RefreshMargin is how long before expiry an ID token is renewed.
 const RefreshMargin = 60 * time.Second
 
+// StaleGrace is the safety margin kept when a cached ID token is used because the refresh
+// could not reach Palette.
+const StaleGrace = 10 * time.Second
+
 // ErrNoSession means the user has to log in again.
 var ErrNoSession = errors.New("no valid session: run: kubectl palette login")
 
@@ -118,8 +122,15 @@ func (m *Manager) IDToken(ctx context.Context) (string, time.Time, error) {
 	if s.fresh(m.now()) {
 		return s.IDToken, s.IDExpiry, nil
 	}
+	cached := s
 	s, err = m.refresh(ctx, "")
 	if err != nil {
+		// Palette could not be reached. A cached token that is still valid keeps kubectl
+		// working until it expires. A rejected session or an expired token is an error.
+		if !errors.Is(err, ErrSessionGone) && !errors.Is(err, ErrNoSession) &&
+			cached.IDToken != "" && m.now().Add(StaleGrace).Before(cached.IDExpiry) {
+			return cached.IDToken, cached.IDExpiry, nil
+		}
 		return "", time.Time{}, err
 	}
 	return s.IDToken, s.IDExpiry, nil

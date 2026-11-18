@@ -4,9 +4,13 @@ package cli
 
 import "os/exec"
 
-// SpawnBackgroundSync starts `<self> sync --background` without waiting for it.
-func SpawnBackgroundSync(self string) error {
-	cmd := exec.Command(self, "sync", "--background")
+// SpawnBackgroundSync starts `<self> sync --background [--tenant <name>]` without waiting for it.
+func SpawnBackgroundSync(self, tenant string) error {
+	args := []string{"sync", "--background"}
+	if tenant != "" {
+		args = append(args, "--tenant", tenant)
+	}
+	cmd := exec.Command(self, args...)
 	if err := cmd.Start(); err != nil {
 		return err
 	}

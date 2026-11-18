@@ -12,14 +12,18 @@ spec:
   description: |
     Log in once through the browser with Spectro Cloud Palette's OIDC provider,
     then name a cluster and run plain kubectl against it. Each terminal gets its
-    own single-cluster kubeconfig under ~/.kube/palette, so there are no contexts
-    to manage and ~/.kube/config is never touched. A local index of cluster names
-    keeps tab completion and the cluster picker fast for one cluster or a thousand.
-    Commands: login, use, exec, current, sync, logout.
+    own single-cluster kubeconfig under ~/.kube/palette. Every OIDC cluster you
+    reach is also added as a context in ~/.kube/config, so kubectl --context works
+    in any terminal. A local index of cluster names keeps tab completion and the
+    cluster picker fast for one cluster or a thousand.
+    Commands: login, use, exec, contexts, current, sync, logout.
   caveats: |
     First login:
-      kubectl palette login --from-kubeconfig <an-OIDC-kubeconfig-from-Palette>
-    This opens a browser once and builds the local cluster index.
+      kubectl palette login --server <palette-url> --tenant <org>
+    This opens a browser once, builds the local cluster index and adds the
+    tenant's clusters as contexts in ~/.kube/config (up to 25 clusters; more are
+    added as you use them). Turn that off with KUBECTL_PALETTE_NO_CONTEXTS=1 or
+    login --no-contexts. Admin credentials are never written there.
 
     Shell hook, so that "kubectl palette use <cluster>" sets KUBECONFIG in the
     current terminal (add to ~/.zshrc or ~/.bashrc):
@@ -29,6 +33,17 @@ spec:
 
     Tab completion of cluster names (kubectl 1.26 or newer):
       kubectl palette completion install
+
+    Uninstall. "kubectl krew uninstall palette" leaves two things behind: the
+    kubectl_complete-palette link next to the krew bin directory, and the contexts
+    in ~/.kube/config. Before uninstalling, run:
+      kubectl palette logout --all
+    That removes every session and every context the plugin added. After
+    uninstalling, delete the kubectl_complete-palette link by hand. Without the
+    plugin, "kubectl --context" calls on those contexts fail, because they run
+    kubectl-palette token. To remove the contexts later, delete them with
+    "kubectl config delete-context <name>" or reinstall the plugin and run
+    "kubectl palette contexts remove --all --all-tenants".
   platforms:
   - selector:
       matchLabels:

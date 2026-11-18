@@ -69,8 +69,11 @@ Cluster access goes through OIDC. An admin kubeconfig is fetched only on an expl
 
 ### IX. Leave the user's kubeconfig alone
 
-Each terminal gets its own `KUBECONFIG` file under `~/.kube/palette/`.
-`~/.kube/config` is never read or written.
+Each terminal gets its own `KUBECONFIG` file under `~/.kube/palette/`. The plugin adds
+contexts to `~/.kube/config` only for OIDC clusters, only entries that run
+`kubectl-palette token`, and only entries it records in its own registry. It never edits
+anything else in that file and never changes `current-context`. Admin credentials are
+never written there.
 
 ---
 

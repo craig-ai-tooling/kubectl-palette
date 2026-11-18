@@ -64,7 +64,7 @@ func TestParseOIDCErrors(t *testing.T) {
 }
 
 func TestRewriteLeavesNoSecret(t *testing.T) {
-	out, err := Rewrite([]byte(sample), "SeCrEt", "leaked-token")
+	out, err := Rewrite([]byte(sample), RewriteOptions{Secrets: []string{"SeCrEt", "leaked-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,10 +97,50 @@ func TestRewriteLeavesNoSecret(t *testing.T) {
 
 func TestRewriteRefusesWhenSecretSurvives(t *testing.T) {
 	// the server URL carries the "secret": it is outside the user entry so it survives
-	if _, err := Rewrite([]byte(sample), "1.2.3.4"); err == nil {
+	if _, err := Rewrite([]byte(sample), RewriteOptions{Secrets: []string{"1.2.3.4"}}); err == nil {
 		t.Fatal("expected refusal")
 	}
-	if _, err := Rewrite([]byte("users:\n- name: a\n  user:\n    token: x\n")); err != ErrNotOIDC {
+	if _, err := Rewrite([]byte("users:\n- name: a\n  user:\n    token: x\n"), RewriteOptions{}); err != ErrNotOIDC {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// The default entry keeps the plain ["token"] arguments. A named entry spells itself out,
+// so a cluster file never depends on which entry is active.
+func TestRewriteExecArgsPerTenant(t *testing.T) {
+	for _, tc := range []struct {
+		tenant string
+		want   []string
+	}{
+		{"", []string{"token"}},
+		{"default", []string{"token"}},
+		{"acme", []string{"token", "--tenant", "acme"}},
+		{"acme+id", []string{"token", "--tenant", "acme", "--issuer-id", "0123456789abcdef"}},
+		{"default+id", []string{"token", "--issuer-id", "0123456789abcdef"}},
+	} {
+		tenant, id := tc.tenant, ""
+		if strings.HasSuffix(tenant, "+id") {
+			tenant, id = strings.TrimSuffix(tenant, "+id"), "0123456789abcdef"
+		}
+		out, err := Rewrite([]byte(sample), RewriteOptions{Tenant: tenant, IssuerID: id, Secrets: []string{"SeCrEt"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var d struct {
+			Users []struct {
+				User struct {
+					Exec struct {
+						Args []string `yaml:"args"`
+					} `yaml:"exec"`
+				} `yaml:"user"`
+			} `yaml:"users"`
+		}
+		if err := yaml.Unmarshal(out, &d); err != nil {
+			t.Fatal(err)
+		}
+		got := d.Users[0].User.Exec.Args
+		if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+			t.Errorf("tenant %q: args %v, want %v", tc.tenant, got, tc.want)
+		}
 	}
 }

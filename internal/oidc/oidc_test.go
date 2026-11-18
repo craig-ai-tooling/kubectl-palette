@@ -272,3 +272,134 @@ func TestRefresherNeedsTokenURL(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+// pasteLogin runs Login with a pipe as input. grab captures the auth URL, and the test
+// then feeds lines through feed.
+func pasteLogin(t *testing.T, f *fakeIssuer, script func(authURL string, redirect, state string, feed func(string)), hint string) (session.Session, string, error) {
+	t.Helper()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	var out strings.Builder
+	var mu sync.Mutex
+	feed := func(s string) {
+		if _, err := io.WriteString(pw, s+"\n"); err != nil {
+			t.Errorf("feed: %v", err)
+		}
+	}
+	s, _, err := Login(context.Background(), LoginOptions{
+		Cfg: f.cfg(), Out: &syncWriter{&mu, &out}, Ports: []int{0}, Timeout: 10 * time.Second, In: pr, Hint: hint,
+		OpenBrowser: func(authURL string) error {
+			u, _ := url.Parse(authURL)
+			q := u.Query()
+			f.mu.Lock()
+			f.nonce = q.Get("nonce")
+			f.mu.Unlock()
+			go script(authURL, q.Get("redirect_uri"), q.Get("state"), feed)
+			return nil
+		},
+	})
+	pr.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	return s, out.String(), err
+}
+
+type syncWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+func TestLoginPaste(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		script  func(authURL, redirect, state string, feed func(string))
+		wantErr string
+		wantOut string
+	}{
+		{"full redirected url", func(_, r, st string, feed func(string)) {
+			feed(r + "/?code=good-code&state=" + url.QueryEscape(st))
+		}, "", "paste it here"},
+		{"query string only", func(_, _, st string, feed func(string)) {
+			feed("?code=good-code&state=" + url.QueryEscape(st))
+		}, "", ""},
+		{"wrong state then correct", func(_, r, st string, feed func(string)) {
+			feed(r + "/?code=good-code&state=evil")
+			feed(r + "/?code=good-code&state=" + url.QueryEscape(st))
+		}, "", "different login attempt"},
+		{"garbage then callback", func(_, r, st string, feed func(string)) {
+			feed("hello there")
+			feed("")
+			resp, err := http.Get(r + "/?code=good-code&state=" + url.QueryEscape(st))
+			if err == nil {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+		}, "", "did not look like"},
+		{"access denied paste", func(_, r, st string, feed func(string)) {
+			feed(r + "/?error=access_denied&state=" + url.QueryEscape(st))
+		}, "access_denied", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newIssuer(t)
+			s, out, err := pasteLogin(t, f, tc.script, "ssh -L 8000:localhost:8000 jump")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.RefreshToken != "rt-1" || s.IDToken == "" {
+				t.Fatalf("%+v", s)
+			}
+			if !strings.Contains(out, "ssh -L 8000") || !strings.Contains(out, tc.wantOut) {
+				t.Fatalf("output missing text %q: %s", tc.wantOut, out)
+			}
+		})
+	}
+}
+
+func TestLoginNoPasteHintsWhenInNil(t *testing.T) {
+	f := newIssuer(t)
+	var out strings.Builder
+	_, _, err := Login(context.Background(), LoginOptions{Cfg: f.cfg(), Out: &out, Ports: []int{0}, Timeout: 50 * time.Millisecond})
+	if err == nil {
+		t.Fatal("expected timeout")
+	}
+	if strings.Contains(out.String(), "paste it here") {
+		t.Fatalf("paste instructions printed without In: %s", out.String())
+	}
+}
+
+func TestHeadless(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		goos string
+		env  map[string]string
+		want bool
+	}{
+		{"linux desktop X11", "linux", map[string]string{"DISPLAY": ":0"}, false},
+		{"linux desktop wayland", "linux", map[string]string{"WAYLAND_DISPLAY": "wayland-0"}, false},
+		{"linux no display", "linux", nil, true},
+		{"linux display over ssh", "linux", map[string]string{"DISPLAY": "localhost:10", "SSH_CONNECTION": "a b c d"}, true},
+		{"linux ssh tty", "linux", map[string]string{"DISPLAY": ":0", "SSH_TTY": "/dev/pts/1"}, true},
+		{"darwin local", "darwin", nil, false},
+		{"darwin ssh", "darwin", map[string]string{"SSH_CONNECTION": "x"}, true},
+		{"windows local", "windows", nil, false},
+		{"windows ssh tty", "windows", map[string]string{"SSH_TTY": "x"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Headless(tc.goos, func(k string) string { return tc.env[k] }); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}

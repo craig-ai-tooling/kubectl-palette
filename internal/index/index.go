@@ -34,7 +34,15 @@ type Cluster struct {
 	// NoOIDC is set when a kubeconfig fetch found no OIDC on the cluster. The metadata
 	// listing does not say, so the index learns it on first use.
 	NoOIDC bool `json:"no_oidc,omitempty"`
+	// HostUID is the uid of the cluster hosting this one. It is set only on virtual
+	// clusters. Host is that cluster's project/cluster ref, empty when the host is not in
+	// the same listing.
+	HostUID string `json:"host_uid,omitempty"`
+	Host    string `json:"host,omitempty"`
 }
+
+// Virtual reports whether this is a virtual cluster running on a host cluster.
+func (c Cluster) Virtual() bool { return c.HostUID != "" }
 
 // CanAdmin reports whether the caller may download this cluster's admin kubeconfig.
 func (c Cluster) CanAdmin() bool {
@@ -107,7 +115,16 @@ func Build(ctx context.Context, src Source, now time.Time) (*Index, error) {
 				perms = append(perms, p)
 			}
 		}
-		idx.Clusters = append(idx.Clusters, Cluster{Name: m.Name, UID: m.UID, ProjectUID: puid, Project: proj, Permissions: perms})
+		idx.Clusters = append(idx.Clusters, Cluster{Name: m.Name, UID: m.UID, ProjectUID: puid, Project: proj, Permissions: perms, HostUID: m.HostUID()})
+	}
+	refs := make(map[string]string, len(idx.Clusters))
+	for _, c := range idx.Clusters {
+		refs[c.UID] = c.Ref()
+	}
+	for n := range idx.Clusters {
+		if h := idx.Clusters[n].HostUID; h != "" {
+			idx.Clusters[n].Host = refs[h]
+		}
 	}
 	sort.Slice(idx.Clusters, func(i, j int) bool { return idx.Clusters[i].Ref() < idx.Clusters[j].Ref() })
 	return idx, nil
@@ -147,6 +164,27 @@ func (i *Index) SetNoOIDC(uid string, no bool) bool {
 		}
 	}
 	return false
+}
+
+// Filter returns a copy holding only the clusters keep accepts. UpdatedAt is kept.
+func (i *Index) Filter(keep func(Cluster) bool) *Index {
+	out := &Index{UpdatedAt: i.UpdatedAt}
+	for _, c := range i.Clusters {
+		if keep(c) {
+			out.Clusters = append(out.Clusters, c)
+		}
+	}
+	return out
+}
+
+// HostedBy resolves q like Resolve and returns the virtual clusters it hosts. A cluster
+// that hosts none gives an empty index. A q that resolves to nothing is an error.
+func (i *Index) HostedBy(q string) (*Index, error) {
+	host, err := i.Resolve(q)
+	if err != nil {
+		return nil, err
+	}
+	return i.Filter(func(c Cluster) bool { return c.HostUID == host.UID }), nil
 }
 
 // Stale reports whether the index is older than StaleAfter.
