@@ -38,7 +38,22 @@ file paths.
 - A login to a different issuer is a different Palette installation. The API URL is derived
   again from the new issuer (or taken from `--api-url`), never carried over, and the old
   session, index and every cached cluster file, OIDC and admin, are removed before the new
-  config is saved.
+  config is saved. This wipe applies to the one tenant entry being logged in, and only on
+  the older `--from-kubeconfig` or `--issuer` form. A `--server` login never wipes
+  anything: a name that holds a different issuer is an error.
+
+### 3a. Tenant entries
+- `token` with no flag always means the `default` entry, never the active one, and never
+  reads `KUBECTL_PALETTE_TENANT`. A named entry's cluster files call `token --tenant <name>`.
+  A cluster file must not be able to send one tenant's token to a cluster in another
+  tenant because the active entry changed.
+- Entry names are validated (`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`, not `default`) before
+  they become a directory name. `.tenants` is rejected as a project or cluster name.
+- A `--server` login calls only unauthenticated endpoints before the browser step. The
+  issuer it reads from discovery must be https (or loopback) and its host must be the
+  server host, the root domain or a subdomain of the root domain, else the login stops.
+- Logout of a named entry removes its whole directory, including the config, and clears
+  `<Home>/active` if it pointed there.
 
 ### 4. Never log secrets
 - Never log tokens, client secrets or API keys, at any log level.
@@ -48,7 +63,9 @@ file paths.
 ### 5. TLS
 - TLS verification is never disabled by default.
 - There is no `--insecure` flag. Self-hosted Palette with a private CA is handled by
-  trusting an explicit CA file.
+  `login --ca-file <pem>`. The absolute path is saved in the entry's config. Every request
+  for that entry (resolution, login, refresh, API) trusts that file in addition to the
+  system roots.
 
 ### 6. API names are untrusted input
 Cluster and project names come from the Palette API. Treat them as untrusted when

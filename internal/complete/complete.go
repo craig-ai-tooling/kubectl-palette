@@ -14,19 +14,33 @@ import (
 const DirectiveNoFileComp = 4
 
 // Commands are the subcommands offered at the first word. Hidden ones are left out.
-var Commands = []string{"login", "use", "exec", "current", "sync", "logout", "token", "shell-init", "completion", "version"}
+var Commands = []string{"login", "tenants", "tenant", "use", "exec", "current", "sync", "logout", "token", "shell-init", "completion", "version"}
 
 // flags lists the flags completed after a command name.
 var flags = map[string][]string{
-	"use":   {"--admin", "--no-fuzzy", "--refresh"},
-	"exec":  {"--admin", "--refresh"},
-	"login": {"--from-kubeconfig", "--issuer", "--client-id", "--client-secret", "--api-url", "--no-browser"},
+	"use":     {"--admin", "--no-fuzzy", "--refresh", "--tenant"},
+	"exec":    {"--admin", "--refresh", "--tenant"},
+	"sync":    {"--tenant"},
+	"logout":  {"--all", "--tenant"},
+	"token":   {"--tenant"},
+	"tenants": {"--available"},
+	"login": {"--server", "--tenant", "--name", "--ca-file", "--from-kubeconfig", "--issuer", "--client-id",
+		"--client-secret", "--api-url", "--no-browser"},
 }
+
+// tenantFlag is the flag whose value is a tenant entry name.
+const tenantFlag = "--tenant"
 
 // Complete returns the candidates for the last word in words. words are the arguments
 // typed after the plugin name, ending with the word under the cursor (possibly empty).
 // idx may be nil when no index exists yet.
 func Complete(idx *index.Index, words []string) []string {
+	return CompleteWith(idx, nil, words)
+}
+
+// CompleteWith is Complete plus the saved tenant entry names, offered after --tenant and
+// for `tenant <TAB>`.
+func CompleteWith(idx *index.Index, entries []string, words []string) []string {
 	if len(words) == 0 {
 		return filter(Commands, "")
 	}
@@ -35,7 +49,27 @@ func Complete(idx *index.Index, words []string) []string {
 		return filter(Commands, cur)
 	}
 	cmd, prior := words[0], words[1:len(words)-1]
+	if _, ok := flags[cmd]; ok || cmd == "tenant" {
+		if v, ok := strings.CutPrefix(cur, tenantFlag+"="); ok {
+			var out []string
+			for _, e := range filter(entries, v) {
+				out = append(out, tenantFlag+"="+e)
+			}
+			return out
+		}
+		if len(prior) > 0 && prior[len(prior)-1] == tenantFlag && cmd != "tenant" {
+			return filter(entries, cur)
+		}
+	}
 	switch cmd {
+	case "tenant":
+		if len(prior) == 0 && !strings.HasPrefix(cur, "-") {
+			return filter(entries, cur)
+		}
+	case "tenants", "sync", "logout", "token":
+		if strings.HasPrefix(cur, "-") {
+			return filter(flags[cmd], cur)
+		}
 	case "use", "exec":
 		for _, w := range prior {
 			if w == "--" {
@@ -71,7 +105,12 @@ func Complete(idx *index.Index, words []string) []string {
 // firstName reports whether the words before the cursor leave the cluster name still to
 // be typed: no positional yet, and no "--" (what follows it belongs to kubectl).
 func firstName(prior []string) bool {
-	for _, w := range prior {
+	for i := 0; i < len(prior); i++ {
+		w := prior[i]
+		if w == tenantFlag {
+			i++ // its value is not a cluster name
+			continue
+		}
 		if w == "--" || !strings.HasPrefix(w, "-") {
 			return false
 		}

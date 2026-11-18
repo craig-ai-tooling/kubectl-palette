@@ -45,8 +45,11 @@ type App struct {
 	StdinIsTTY  bool
 
 	OpenBrowser func(url string) error
-	// SpawnSync starts a detached background index refresh.
-	SpawnSync func() error
+	// SpawnSync starts a detached background index refresh for a tenant entry ("" is the
+	// default entry).
+	SpawnSync func(tenant string) error
+	// Login runs the browser flow; the default is oidc.Login. Tests replace it.
+	Login func(ctx context.Context, o oidc.LoginOptions) (session.Session, config.Config, error)
 	// RunKubectl runs kubectl with the given extra environment and returns its exit code.
 	RunKubectl func(env []string, args []string) int
 	// SpawnShell starts an interactive shell with KUBECONFIG set.
@@ -65,16 +68,22 @@ type App struct {
 const usage = `usage: kubectl palette <command>
 
 commands:
-  login        log in through the browser (--from-kubeconfig <file> the first time)
-  use          target a cluster in this terminal: use [name] [--admin] [--no-fuzzy] [--refresh]
-  exec         run kubectl against a cluster once: exec <name> [--admin] [--refresh] -- <args>
+  login        log in through the browser: login --server <url> [--tenant <org>] [--name <entry>] [--ca-file <pem>]
+               (again later: login [--tenant <entry>]; older form: --from-kubeconfig <file>)
+  tenants      list the logged-in tenants: tenants [--available]
+  tenant       show or set the active tenant: tenant [name]
+  use          target a cluster in this terminal: use [name] [--admin] [--no-fuzzy] [--refresh] [--tenant <name>]
+  exec         run kubectl against a cluster once: exec <name> [--admin] [--refresh] [--tenant <name>] -- <args>
   current      show the cluster and mode for this terminal
-  sync         rebuild the local cluster index
-  logout       delete the session, the index and admin kubeconfigs
-  token        exec-credential plugin used by the kubeconfigs
+  sync         rebuild the local cluster index: sync [--tenant <name>]
+  logout       log out of one tenant or all: logout [--tenant <name>] [--all]
+  token        exec-credential plugin used by the kubeconfigs: token [--tenant <name>]
   shell-init   print the shell hook: shell-init zsh|bash
   completion   tab completion for kubectl: completion install [--dir <dir>]
   version      print the version
+
+A tenant is chosen by --tenant, then $KUBECTL_PALETTE_TENANT, then the active tenant
+(kubectl palette tenant <name>). "token" without --tenant always means the default tenant.
 `
 
 func (a *App) now() time.Time {
@@ -99,13 +108,21 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	}
 	var err error
 	rest := args[1:]
+	// A command selects a tenant entry by pointing a.Paths at it. Put the root back so
+	// one App can run several commands, as the tests do.
+	root := a.Paths
+	defer func() { a.Paths = root }()
 	switch args[0] {
 	case "version", "--version":
 		fmt.Fprintln(a.Stdout, a.Version)
 	case "login":
 		err = a.login(ctx, rest)
 	case "token":
-		err = a.token(ctx)
+		err = a.token(ctx, rest)
+	case "tenants":
+		err = a.tenants(ctx, rest)
+	case "tenant":
+		err = a.tenantCmd(rest)
 	case "sync":
 		err = a.sync(ctx, rest)
 	case "use":
@@ -115,7 +132,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	case "current":
 		err = a.current()
 	case "logout":
-		err = a.logout()
+		err = a.logout(rest)
 	case "shell-init":
 		err = a.shellInit(rest)
 	case "completion":
@@ -176,7 +193,11 @@ func (l lazyRefresher) Refresh(ctx context.Context, rt string) (string, string, 
 	if err != nil {
 		return "", "", err
 	}
-	return oidc.Refresher{Cfg: cfg, HTTP: l.a.httpClient()}.Refresh(ctx, rt)
+	hc, err := l.a.httpFor(cfg)
+	if err != nil {
+		return "", "", err
+	}
+	return oidc.Refresher{Cfg: cfg, HTTP: hc}.Refresh(ctx, rt)
 }
 
 func (a *App) sessionMgr() *session.Manager {
@@ -192,13 +213,20 @@ func (a *App) apiClient() (*palette.Client, error) {
 		return nil, err
 	}
 	if cfg.APIURL == "" {
-		return nil, errors.New("no API URL saved: run: kubectl palette login")
+		return nil, fmt.Errorf("no API URL saved: run: %s", a.loginHint())
+	}
+	hc, err := a.httpFor(cfg)
+	if err != nil {
+		return nil, err
 	}
 	m := a.sessionMgr()
 	if _, err := m.Load(); err != nil {
+		if errors.Is(err, session.ErrNoSession) {
+			return nil, fmt.Errorf("no valid session: run: %s", a.loginHint())
+		}
 		return nil, err
 	}
-	return &palette.Client{BaseURL: cfg.APIURL, HTTP: a.httpClient(), Token: m.APIToken, Renew: m.RefreshAfterReject}, nil
+	return &palette.Client{BaseURL: cfg.APIURL, HTTP: hc, Token: m.APIToken, Renew: m.RefreshAfterReject}, nil
 }
 
 // --- token ---
@@ -212,14 +240,26 @@ type execCredential struct {
 	} `json:"status"`
 }
 
-func (a *App) token(ctx context.Context) error {
+// token prints the exec credential. It never reads the active entry or the environment:
+// plain "token" is the default entry and "token --tenant x" is exactly x. A cluster file
+// spells out which entry it belongs to, so changing the active entry can never send one
+// tenant's token to a cluster in another tenant.
+func (a *App) token(ctx context.Context, args []string) error {
+	fs := newFlags("token", a.Stderr)
+	tenant := fs.String("tenant", "", "tenant entry whose token to print (default: the default entry)")
+	if _, err := parseFlags(fs, args); err != nil {
+		return exitError(2)
+	}
+	if *tenant != "" && *tenant != config.DefaultEntry {
+		if err := config.ValidEntryName(*tenant); err != nil {
+			return err
+		}
+	}
+	a.Paths = a.Paths.ForTenant(*tenant)
 	tok, exp, err := a.sessionMgr().IDToken(ctx)
 	if err != nil {
-		if errors.Is(err, config.ErrNoConfig) {
-			return errors.New("run: kubectl palette login")
-		}
-		if errors.Is(err, session.ErrNoSession) || errors.Is(err, session.ErrSessionGone) {
-			return errors.New("run: kubectl palette login")
+		if errors.Is(err, config.ErrNoConfig) || errors.Is(err, session.ErrNoSession) || errors.Is(err, session.ErrSessionGone) {
+			return errors.New("run: " + a.loginHint())
 		}
 		return err
 	}
@@ -253,8 +293,12 @@ func (a *App) buildIndex(ctx context.Context) (*index.Index, error) {
 func (a *App) sync(ctx context.Context, args []string) error {
 	fs := newFlags("sync", a.Stderr)
 	bg := fs.Bool("background", false, "internal: quiet refresh started by another command")
+	tenant := fs.String("tenant", "", "tenant entry to sync")
 	if _, err := parseFlags(fs, args); err != nil {
 		return exitError(2)
+	}
+	if err := a.selectTenant(*tenant); err != nil {
+		return err
 	}
 	if *bg {
 		// One background refresh at a time; a busy lock means one is already running.
@@ -286,7 +330,11 @@ func (a *App) loadOrBuildIndex(ctx context.Context) (idx *index.Index, built boo
 
 func (a *App) maybeBackgroundSync(idx *index.Index) {
 	if a.SpawnSync != nil && idx.Stale(a.now()) {
-		_ = a.SpawnSync()
+		t := a.Paths.Entry()
+		if t == config.DefaultEntry {
+			t = ""
+		}
+		_ = a.SpawnSync(t)
 	}
 }
 
@@ -304,139 +352,7 @@ func (a *App) resolve(ctx context.Context, idx *index.Index, fresh bool, name st
 	return cl, idx, fresh, err
 }
 
-// --- login ---
-
-func (a *App) login(ctx context.Context, args []string) error {
-	fs := newFlags("login", a.Stderr)
-	fromKC := fs.String("from-kubeconfig", "", "read issuer, client id and secret from a Palette OIDC kubeconfig")
-	issuer := fs.String("issuer", "", "OIDC issuer URL")
-	clientID := fs.String("client-id", "", "OIDC client id")
-	clientSecret := fs.String("client-secret", "", "OIDC client secret")
-	apiURL := fs.String("api-url", "", "Palette API URL (default derived from the issuer host)")
-	noBrowser := fs.Bool("no-browser", false, "print the login URL without opening a browser")
-	importDir := fs.String("import-kubelogin-cache", "", "")
-	bootstrap := fs.String("bootstrap-json", "", "")
-	if _, err := parseFlags(fs, args); err != nil {
-		return exitError(2)
-	}
-
-	cfg, err := a.Paths.Load()
-	if err != nil && !errors.Is(err, config.ErrNoConfig) {
-		return err
-	}
-	oldIssuer := cfg.Issuer
-	apiExplicit := *apiURL != ""
-	if *bootstrap != "" {
-		b, err := os.ReadFile(*bootstrap)
-		if err != nil {
-			return err
-		}
-		var j struct{ Issuer, ClientID, ClientSecret, API string }
-		var raw map[string]string
-		if err := json.Unmarshal(b, &raw); err != nil {
-			return fmt.Errorf("parse %s: %w", *bootstrap, err)
-		}
-		j.Issuer, j.ClientID, j.ClientSecret, j.API = raw["issuer"], raw["client_id"], raw["client_secret"], raw["api"]
-		cfg.Issuer, cfg.ClientID, cfg.ClientSecret, cfg.APIURL = j.Issuer, j.ClientID, j.ClientSecret, j.API
-		apiExplicit = apiExplicit || j.API != ""
-	}
-	if *fromKC != "" {
-		b, err := os.ReadFile(*fromKC)
-		if err != nil {
-			return err
-		}
-		o, err := kubeconfig.ParseOIDC(b)
-		if err != nil {
-			return fmt.Errorf("%s: %w", *fromKC, err)
-		}
-		cfg.Issuer, cfg.ClientID, cfg.ClientSecret = o.Issuer, o.ClientID, o.ClientSecret
-	}
-	for _, f := range []struct {
-		dst *string
-		v   string
-	}{
-		{&cfg.Issuer, *issuer}, {&cfg.ClientID, *clientID}, {&cfg.ClientSecret, *clientSecret}, {&cfg.APIURL, *apiURL},
-	} {
-		if f.v != "" {
-			*f.dst = f.v
-		}
-	}
-	// A different issuer is a different Palette installation. Keeping the saved API URL would
-	// send the new refresh token to the old one, so derive it again.
-	issuerChanged := oldIssuer != "" && cfg.Issuer != oldIssuer
-	if issuerChanged && !apiExplicit {
-		cfg.APIURL = deriveAPIURL(cfg.Issuer)
-	}
-	if cfg.APIURL == "" {
-		cfg.APIURL = deriveAPIURL(cfg.Issuer)
-	}
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-
-	m := a.sessionMgr()
-	var sess session.Session
-	if *importDir != "" {
-		sess, err = importKubeloginCache(*importDir)
-		if err != nil {
-			return err
-		}
-		_, ep, err := oidc.Discover(ctx, cfg.Issuer, a.HTTP)
-		if err != nil {
-			return err
-		}
-		cfg.AuthURL, cfg.TokenURL = ep.AuthURL, ep.TokenURL
-	} else {
-		var open func(string) error
-		if !*noBrowser {
-			open = a.OpenBrowser
-		}
-		sess, cfg, err = oidc.Login(ctx, oidc.LoginOptions{Cfg: cfg, HTTP: a.HTTP, Ports: a.LoginPorts, Out: a.Stderr, OpenBrowser: open})
-		if err != nil {
-			return err
-		}
-	}
-	if issuerChanged {
-		if err := a.wipeState(m); err != nil {
-			return fmt.Errorf("issuer changed from %s to %s and the old state could not be removed, nothing was saved: %w", oldIssuer, cfg.Issuer, err)
-		}
-		fmt.Fprintf(a.Stderr, "issuer changed: removed the old session, index and cached kubeconfigs\n")
-	}
-	if err := a.Paths.Save(cfg); err != nil {
-		return err
-	}
-	if err := m.Save(sess); err != nil {
-		return err
-	}
-	start := a.now()
-	idx, err := a.buildIndex(ctx)
-	if err != nil {
-		return fmt.Errorf("logged in, but building the cluster index failed (run: kubectl palette sync): %w", err)
-	}
-	fmt.Fprintf(a.Stderr, "logged in; indexed %d clusters in %.1fs\n", len(idx.Clusters), a.now().Sub(start).Seconds())
-	if len(idx.Clusters) == 1 {
-		c := idx.Clusters[0]
-		if _, _, err := a.ensureKubeconfig(ctx, c, false, false); err != nil {
-			fmt.Fprintf(a.Stderr, "one cluster found (%s) but its kubeconfig could not be prepared: %v\n", c.Ref(), err)
-			return nil
-		}
-		fmt.Fprintf(a.Stderr, "one cluster found and selected: %s. Run: kubectl palette use\n", c.Ref())
-	}
-	return nil
-}
-
-// wipeState removes everything tied to the previous installation: session, index and every
-// cached cluster file, OIDC and admin.
-func (a *App) wipeState(m *session.Manager) error {
-	errs := []error{m.Delete()}
-	for _, p := range []string{a.Paths.IndexFile(), a.Paths.IndexLock()} {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, err)
-		}
-	}
-	_, cerrs := a.clearClusterFiles(false)
-	return errors.Join(append(errs, cerrs...)...)
-}
+// --- login: see login.go ---
 
 func deriveAPIURL(issuer string) string {
 	u, err := url.Parse(issuer)
@@ -541,7 +457,7 @@ func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin, refr
 			return "", false, cerr
 		}
 		o, _ := kubeconfig.ParseOIDC(raw)
-		raw, err = kubeconfig.Rewrite(raw, cfg.ClientSecret, o.ClientSecret)
+		raw, err = kubeconfig.Rewrite(raw, a.Paths.Entry(), cfg.ClientSecret, o.ClientSecret)
 		if err != nil {
 			return "", false, fmt.Errorf("rewrite kubeconfig for %s: %w", c.Ref(), err)
 		}
@@ -572,12 +488,16 @@ func (a *App) use(ctx context.Context, args []string) error {
 	printEnv := fs.Bool("print-env", false, "print an export line for the shell hook")
 	noFuzzy := fs.Bool("no-fuzzy", false, "with no name, use a numbered list instead of the fuzzy finder")
 	refresh := fs.Bool("refresh", false, "fetch the kubeconfig again instead of using the cached file")
+	tenant := fs.String("tenant", "", "tenant entry to use")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return exitError(2)
 	}
 	if len(pos) > 1 {
-		return errors.New("usage: kubectl palette use [name] [--admin] [--refresh]")
+		return errors.New("usage: kubectl palette use [name] [--admin] [--refresh] [--tenant <name>]")
+	}
+	if err := a.selectTenant(*tenant); err != nil {
+		return err
 	}
 	idx, fresh, err := a.loadOrBuildIndex(ctx)
 	if err != nil {
@@ -606,7 +526,7 @@ func (a *App) use(ctx context.Context, args []string) error {
 	if fetched {
 		fmt.Fprintf(a.Stderr, "fetched kubeconfig for %s\n", c.Ref())
 	}
-	fmt.Fprintf(a.Stderr, "using %s (%s)\n", c.Ref(), mode)
+	fmt.Fprintf(a.Stderr, "using %s%s (%s)\n", a.entryPrefix(), c.Ref(), mode)
 	if !fresh {
 		a.maybeBackgroundSync(idx)
 	}
@@ -716,15 +636,19 @@ func (a *App) execCmd(ctx context.Context, args []string) int {
 	fs := newFlags("exec", a.Stderr)
 	admin := fs.Bool("admin", false, "use the admin kubeconfig")
 	refresh := fs.Bool("refresh", false, "fetch the kubeconfig again instead of using the cached file")
+	tenant := fs.String("tenant", "", "tenant entry to use")
 	pos, err := parseFlags(fs, before)
 	if err != nil {
 		return 2
 	}
 	if len(pos) != 1 || !split || len(kargs) == 0 {
-		fmt.Fprintln(a.Stderr, "usage: kubectl palette exec <name> [--admin] [--refresh] -- <kubectl args>")
+		fmt.Fprintln(a.Stderr, "usage: kubectl palette exec <name> [--admin] [--refresh] [--tenant <name>] -- <kubectl args>")
 		return 2
 	}
 	run := func() (int, error) {
+		if err := a.selectTenant(*tenant); err != nil {
+			return 0, err
+		}
 		idx, fresh, err := a.loadOrBuildIndex(ctx)
 		if err != nil {
 			return 0, err
@@ -752,12 +676,24 @@ func (a *App) execCmd(ctx context.Context, args []string) int {
 
 // --- current, logout, shell-init ---
 
+// current reads the layout from KUBECONFIG alone, so it needs no saved entry: a flat file
+// is <project>/<cluster>.yaml and a named entry's is .tenants/<entry>/<project>/....
 func (a *App) current() error {
 	kc := a.Getenv("KUBECONFIG")
-	rel, err := filepath.Rel(a.Paths.KubeDir, kc)
+	kube := a.Paths.Root().KubeDir
+	rel, err := filepath.Rel(kube, kc)
 	if kc == "" || err != nil || strings.Contains(kc, string(os.PathListSeparator)) || strings.HasPrefix(rel, "..") {
 		fmt.Fprintln(a.Stdout, "no Palette cluster selected in this terminal")
 		return exitError(1)
+	}
+	prefix := ""
+	if parts := strings.Split(rel, string(filepath.Separator)); parts[0] == config.TenantKubeDir {
+		if len(parts) < 4 {
+			fmt.Fprintln(a.Stdout, "no Palette cluster selected in this terminal")
+			return exitError(1)
+		}
+		prefix = parts[1] + ": "
+		rel = filepath.Join(parts[2:]...)
 	}
 	dir, file := filepath.Split(rel)
 	mode := "oidc"
@@ -766,30 +702,7 @@ func (a *App) current() error {
 		mode = "admin"
 		dir = filepath.Dir(filepath.Clean(dir)) + string(filepath.Separator)
 	}
-	fmt.Fprintf(a.Stdout, "%s%s (%s)\n", dir, name, mode)
-	return nil
-}
-
-func (a *App) logout() error {
-	var errs []error
-	if err := a.sessionMgr().Delete(); err != nil {
-		errs = append(errs, err)
-	}
-	for _, p := range []string{a.Paths.IndexFile(), a.Paths.IndexLock()} {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, err)
-		}
-	}
-	removed, cerrs := a.clearClusterFiles(true)
-	errs = append(errs, cerrs...)
-	if len(errs) > 0 {
-		fmt.Fprintln(a.Stderr, "logout incomplete, these could not be removed:")
-		for _, e := range errs {
-			fmt.Fprintf(a.Stderr, "  %v\n", e)
-		}
-		return exitError(1)
-	}
-	fmt.Fprintf(a.Stderr, "logged out; removed the session, the index and %d admin kubeconfig(s)\n", removed)
+	fmt.Fprintf(a.Stdout, "%s%s%s (%s)\n", prefix, dir, name, mode)
 	return nil
 }
 
@@ -807,8 +720,8 @@ func (a *App) clearClusterFiles(adminOnly bool) (admin int, errs []error) {
 		return 0, []error{err}
 	}
 	for _, pd := range projects {
-		if !pd.IsDir() {
-			continue
+		if !pd.IsDir() || pd.Name() == config.TenantKubeDir {
+			continue // named entries own that directory and are removed by their own logout
 		}
 		dir := filepath.Join(a.Paths.KubeDir, pd.Name())
 		ents, err := os.ReadDir(dir)

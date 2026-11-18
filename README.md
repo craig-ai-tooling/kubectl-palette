@@ -46,13 +46,40 @@ kubectl krew install --manifest=dist/palette.yaml --archive="dist/kubectl-palett
 
 ## Quick start
 
-Log in once. The first time, point it at any Palette OIDC kubeconfig (download one from the
-console) so it can read the issuer, client id and secret. They are saved to
-`~/.config/kubectl-palette/config.json`, so later logins need no flags.
+Log in once with the Palette server and your tenant (org) name. Nothing else is needed.
+If the server URL already identifies one tenant, `--tenant` can be left out.
 
 ```
+kubectl palette login --server https://palette.example.com --tenant acme
+```
+
+If the server does not publish the tenant UID for your org, the login says so. Pass the
+UID (the last path element of the OIDC issuer URL in an OIDC file from any cluster) as
+`--tenant`, or read it from such a file:
+
+```
+kubectl palette login --server https://palette.example.com --tenant 0123456789abcdef01234567
 kubectl palette login --from-kubeconfig ~/Downloads/some-cluster.yaml
 ```
+
+A private CA: add `--ca-file ca.pem`. It is saved with the tenant and trusted next to the
+system roots. TLS verification is never turned off.
+
+Several tenants stay logged in at once, on one server or several. Each login saves its own
+entry, named after the org (or `--name`), and makes it active.
+
+```
+kubectl palette login --server https://palette.example.com --tenant globex
+kubectl palette tenants                      # entries, active marker, logged in or expired
+kubectl palette tenants --available          # orgs on this account with no entry yet
+kubectl palette tenant acme                  # switch the active tenant
+kubectl palette use web --tenant globex      # or pick per command, or set KUBECTL_PALETTE_TENANT
+kubectl palette logout --tenant globex       # one tenant (--all for every tenant)
+kubectl palette login --tenant acme          # log in to a saved tenant again
+```
+
+Existing single-tenant state keeps working as the `default` tenant, with no migration.
+Cluster files of a named tenant are under `~/.kube/palette/.tenants/<name>/`.
 
 Install the shell hook once (zsh or bash). Without it, `use` opens a subshell.
 
@@ -80,11 +107,11 @@ kubectl palette exec payments-prod -- get pods
 kubectl palette current
 kubectl palette sync                         # rebuild the cluster index now
 kubectl palette use payments-prod --refresh  # fetch the kubeconfig again (also: exec --refresh), e.g. after the endpoint or CA changed
-kubectl palette logout                       # removes the session, the index, admin files
+kubectl palette logout                       # removes the selected tenant's session, index, admin files
 ```
 
 Headless host: add `--no-browser` and forward port 8000 with `ssh -L 8000:localhost:8000`.
-Cluster files are written to `~/.kube/palette/<project>/<cluster>.yaml` (mode 600; admin files go to `<project>/.admin/<cluster>.yaml`) and hold
+Cluster files of the default tenant are written to `~/.kube/palette/<project>/<cluster>.yaml` (mode 600; admin files go to `<project>/.admin/<cluster>.yaml`) and hold
 no token or secret. `~/.kube/config` is never touched.
 
 ## Develop
