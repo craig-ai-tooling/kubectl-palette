@@ -115,8 +115,14 @@ func TestRewriteExecArgsPerTenant(t *testing.T) {
 		{"", []string{"token"}},
 		{"default", []string{"token"}},
 		{"acme", []string{"token", "--tenant", "acme"}},
+		{"acme+id", []string{"token", "--tenant", "acme", "--issuer-id", "0123456789abcdef"}},
+		{"default+id", []string{"token", "--issuer-id", "0123456789abcdef"}},
 	} {
-		out, err := Rewrite([]byte(sample), RewriteOptions{Tenant: tc.tenant, Secrets: []string{"SeCrEt"}})
+		tenant, id := tc.tenant, ""
+		if strings.HasSuffix(tenant, "+id") {
+			tenant, id = strings.TrimSuffix(tenant, "+id"), "0123456789abcdef"
+		}
+		out, err := Rewrite([]byte(sample), RewriteOptions{Tenant: tenant, IssuerID: id, Secrets: []string{"SeCrEt"}})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -124,11 +124,15 @@ func ParseOIDC(raw []byte) (OIDC, error) {
 // so the file always asks for that entry's token. Plain `token` means the default entry and
 // never the active one: a cluster file must not send one tenant's token to another tenant's
 // cluster because the active entry changed.
-func tokenArgs(tenant string) []any {
-	if tenant == "" || tenant == "default" {
-		return []any{"token"}
+func tokenArgs(tenant, issuerID string) []any {
+	args := []any{"token"}
+	if tenant != "" && tenant != "default" {
+		args = append(args, "--tenant", tenant)
 	}
-	return []any{"token", "--tenant", tenant}
+	if issuerID != "" {
+		args = append(args, "--issuer-id", issuerID)
+	}
+	return args
 }
 
 // RewriteOptions are the arguments of Rewrite. They are named fields so a secret can never
@@ -136,6 +140,9 @@ func tokenArgs(tenant string) []any {
 type RewriteOptions struct {
 	// Tenant is the entry the file belongs to ("" or "default" for the flat default entry).
 	Tenant string
+	// IssuerID is config.IssuerID of the entry's issuer. It is written as --issuer-id so
+	// `token` can refuse the file once the entry holds a different login.
+	IssuerID string
 	// Secrets are values that must not appear in the output; finding one is an error.
 	Secrets []string
 }
@@ -159,7 +166,7 @@ func Rewrite(raw []byte, o RewriteOptions) ([]byte, error) {
 		um["user"] = map[string]any{"exec": map[string]any{
 			"apiVersion":      "client.authentication.k8s.io/v1beta1",
 			"command":         ExecCommand,
-			"args":            tokenArgs(tenant),
+			"args":            tokenArgs(tenant, o.IssuerID),
 			"interactiveMode": "Never",
 		}}
 		n++

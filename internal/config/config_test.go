@@ -132,7 +132,7 @@ func TestValidEntryName(t *testing.T) {
 		in string
 		ok bool
 	}{
-		{"acme", true}, {"Acme-2.prod_x", true}, {"a", true}, {strings.Repeat("a", 63), true},
+		{"acme", true}, {"acme-2.prod_x", true}, {"Acme", false}, {"ACME", false}, {"acme.", false}, {"acme..", false}, {"a", true}, {strings.Repeat("a", 63), true},
 		{"default", false}, {"", false}, {".hidden", false}, {"-x", false}, {"a/b", false}, {"..", false},
 		{"a b", false}, {strings.Repeat("a", 64), false}, {".tenants", false}, {"a\x00b", false},
 	} {
@@ -265,5 +265,30 @@ func TestContextFileResolution(t *testing.T) {
 	// A hand-built Paths has no context file.
 	if (Paths{Home: h, KubeDir: h}).ContextFile() != "" {
 		t.Fatal("hand-built Paths must not name a context file")
+	}
+}
+
+func TestIssuerID(t *testing.T) {
+	a := IssuerID("https://p.example.test/v1/oidc/tenant/abc")
+	if len(a) != 16 || strings.Trim(a, "0123456789abcdef") != "" {
+		t.Fatalf("id %q", a)
+	}
+	if a != IssuerID("https://p.example.test/v1/oidc/tenant/abc/") || a != IssuerID("https://p.example.test/v1/oidc/tenant/abc//") {
+		t.Fatal("trailing slashes must not change the id")
+	}
+	if a == IssuerID("https://p.example.test/v1/oidc/tenant/abd") {
+		t.Fatal("different issuers share an id")
+	}
+}
+
+func TestMatchEntry(t *testing.T) {
+	entries := []string{"default", "acme"}
+	for in, want := range map[string]string{"acme": "acme", "ACME": "acme", "Default": "default"} {
+		if got, ok := MatchEntry(entries, in); !ok || got != want {
+			t.Errorf("%q -> %q %v", in, got, ok)
+		}
+	}
+	if _, ok := MatchEntry(entries, "other"); ok {
+		t.Error("matched a missing entry")
 	}
 }

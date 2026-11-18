@@ -2,6 +2,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,7 +58,7 @@ type Paths struct {
 	rootKube string
 }
 
-var entryNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
+var entryNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 
 // ValidEntryName checks a name for a named tenant entry. It keeps the name safe to use as a
 // directory name. DefaultEntry is reserved for the flat layout.
@@ -64,10 +66,35 @@ func ValidEntryName(name string) error {
 	if name == DefaultEntry {
 		return fmt.Errorf("%q is reserved for the default entry", name)
 	}
-	if !entryNameRE.MatchString(name) {
-		return fmt.Errorf("invalid tenant entry name %q: use letters, digits, '.', '_' or '-', starting with a letter or digit, at most 63 characters", name)
+	if !entryNameRE.MatchString(name) || strings.HasSuffix(name, ".") {
+		return fmt.Errorf("invalid tenant entry name %q: use lowercase letters, digits, '.', '_' or '-', starting with a letter or digit, not ending in '.', at most 63 characters", name)
 	}
 	return nil
+}
+
+// MatchEntry finds the saved entry a user-typed name means. Entry names are lowercase, so a
+// name that differs only in case matches the lowercase entry.
+func MatchEntry(entries []string, name string) (string, bool) {
+	for _, e := range entries {
+		if e == name {
+			return e, true
+		}
+	}
+	lower := strings.ToLower(name)
+	for _, e := range entries {
+		if e == lower {
+			return e, true
+		}
+	}
+	return "", false
+}
+
+// IssuerID is a short stable id of an OIDC issuer: the first 16 hex characters of the
+// SHA-256 of the issuer with trailing slashes removed. Cluster kubeconfigs carry it so a
+// tenant entry that later holds another Palette login cannot serve its token to them.
+func IssuerID(issuer string) string {
+	sum := sha256.Sum256([]byte(strings.TrimRight(issuer, "/")))
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 // Entry is the selected entry name, DefaultEntry when none was applied.

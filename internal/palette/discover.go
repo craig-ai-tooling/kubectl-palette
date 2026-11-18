@@ -273,6 +273,9 @@ func Resolve(ctx context.Context, hc *http.Client, server, tenant string) (Resol
 			if org.isRoot() {
 				return res, fmt.Errorf("no tenant named %q at %s", tenant, base)
 			}
+			if !strings.EqualFold(org.OrgName, tenant) {
+				return res, fmt.Errorf("%s answered as organization %q, not %q: refusing to log in there", orgBase, org.OrgName, tenant)
+			}
 			res.Org = tenant
 		}
 		var ok bool
