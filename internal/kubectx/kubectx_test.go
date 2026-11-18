@@ -21,6 +21,11 @@ type env struct {
 	kc, reg string
 }
 
+func TestMain(m *testing.M) {
+	skipSync = true
+	os.Exit(m.Run())
+}
+
 func newEnv(t *testing.T) env {
 	d := t.TempDir()
 	return env{t: t, kc: filepath.Join(d, "kube", "config"), reg: filepath.Join(d, "cfg", "contexts.json")}
@@ -523,5 +528,102 @@ func TestConcurrentUpserts(t *testing.T) {
 	recs, _ := List(e.reg)
 	if len(recs) != n || len(got.Contexts) != n || len(got.Clusters) != n {
 		t.Fatalf("records %d contexts %d clusters %d", len(recs), len(got.Contexts), len(got.Clusters))
+	}
+}
+
+func TestUpsertAll(t *testing.T) {
+	e := newEnv(t)
+	eu := func(s string) []byte { return src(s, "token", "--tenant", "eu") }
+	bad := []byte("apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster: {server: \"https://s.example.test\"}\ncontexts:\n- name: c\n  context: {cluster: c, user: u}\nusers:\n- name: u\n  user: {token: abc}\n")
+	items := []Item{
+		{Entry{Tenant: "default", Project: "p1", Cluster: "web", UID: "u1"}, plain("https://1.example.test")},
+		{Entry{Tenant: "eu", Project: "p1", Cluster: "api", UID: "u2"}, eu("https://2.example.test")},
+		{Entry{Tenant: "default", Project: "p1", Cluster: "evil", UID: "u3"}, bad},
+		{Entry{Tenant: "default", Project: "p2", Cluster: "web", UID: "u4"}, plain("https://4.example.test")},
+		{Entry{Tenant: "default", Project: "p1", Cluster: "junk", UID: "u5"}, []byte("not a kubeconfig: [")},
+		{Entry{Tenant: "eu", Project: "p2", Cluster: "db", UID: "u6"}, eu("https://6.example.test")},
+	}
+	w0 := writes.Load()
+	res, err := UpsertAll(e.kc, e.reg, items, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := writes.Load() - w0; n != 2 {
+		t.Fatalf("%d writes, want 2 (one per file)", n)
+	}
+	if len(res) != len(items) {
+		t.Fatalf("%d results", len(res))
+	}
+	for i, wantErr := range []bool{false, false, true, false, true, false} {
+		if (res[i].Err != nil) != wantErr {
+			t.Fatalf("item %d err %v", i, res[i].Err)
+		}
+	}
+	if res[0].Record.Context != "web" || res[3].Record.Context != "p2/web" {
+		t.Fatalf("same short name not split: %q %q", res[0].Record.Context, res[3].Record.Context)
+	}
+	if res[1].Record.User != "palette-eu" || res[5].Record.User != "palette-eu" || res[0].Record.User != "palette" {
+		t.Fatalf("users %q %q %q", res[0].Record.User, res[1].Record.User, res[5].Record.User)
+	}
+	got := e.load()
+	if len(got.Contexts) != 4 || len(got.AuthInfos) != 2 || got.Contexts["evil"] != nil {
+		t.Fatalf("contexts %d users %d", len(got.Contexts), len(got.AuthInfos))
+	}
+	recs, _ := List(e.reg)
+	if len(recs) != 4 {
+		t.Fatalf("records %d", len(recs))
+	}
+}
+
+func TestUpsertAllNoWrites(t *testing.T) {
+	e := newEnv(t)
+	w0 := writes.Load()
+	if res, err := UpsertAll(e.kc, e.reg, nil, t0); err != nil || len(res) != 0 {
+		t.Fatalf("%v %v", res, err)
+	}
+	if writes.Load() != w0 {
+		t.Fatal("empty batch wrote")
+	}
+	for _, p := range []string{e.kc, e.reg} {
+		if _, err := os.Stat(p); err == nil {
+			t.Fatalf("%s created", p)
+		}
+	}
+
+	e.write(foreign)
+	e.up("", "p", "keep", "u0", plain("https://k.example.test"))
+	kb, _ := os.ReadFile(e.kc)
+	rb, _ := os.ReadFile(e.reg)
+	w0 = writes.Load()
+	res, err := UpsertAll(e.kc, e.reg, []Item{
+		{Entry{Project: "p", Cluster: "a", UID: "u1"}, []byte("garbage: [")},
+		{Entry{Project: "p", Cluster: "b", UID: "u2"}, src("https://s.example.test", "admin")},
+	}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res[0].Err == nil || res[1].Err == nil {
+		t.Fatal("expected both to fail")
+	}
+	ka, _ := os.ReadFile(e.kc)
+	ra, _ := os.ReadFile(e.reg)
+	if writes.Load() != w0 || string(kb) != string(ka) || string(rb) != string(ra) {
+		t.Fatal("all-failed batch changed files")
+	}
+}
+
+func TestUpsertAllBadKubeconfigWritesNothing(t *testing.T) {
+	e := newEnv(t)
+	e.write("{ not yaml")
+	before, _ := os.ReadFile(e.kc)
+	if _, err := UpsertAll(e.kc, e.reg, []Item{{Entry{Project: "p", Cluster: "a", UID: "u"}, plain("https://a.example.test")}}, t0); err == nil {
+		t.Fatal("expected error")
+	}
+	after, _ := os.ReadFile(e.kc)
+	if string(before) != string(after) {
+		t.Fatal("kubeconfig changed")
+	}
+	if _, err := os.Stat(e.reg); err == nil {
+		t.Fatal("registry written")
 	}
 }

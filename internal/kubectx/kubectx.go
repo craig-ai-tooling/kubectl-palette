@@ -21,12 +21,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/clientcmd/api"
 
-	"github.com/craig-ai-tooling/kubectl-palette/internal/config"
 	"github.com/craig-ai-tooling/kubectl-palette/internal/session"
 )
 
@@ -55,6 +55,52 @@ type Record struct {
 type registryFile struct {
 	Version int      `json:"version"`
 	Records []Record `json:"records"`
+}
+
+// Test switches. skipSync turns off fsync so tests run fast; writes counts file writes.
+var (
+	skipSync bool
+	writes   atomic.Int64
+)
+
+// writeAtomic writes data to path through a mode-600 temp file in the same directory and a
+// rename. It is config.WriteFileAtomic with a switch for tests.
+func writeAtomic(path string, data []byte) error {
+	writes.Add(1)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	f, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file in %s: %w", dir, err)
+	}
+	tmp := f.Name()
+	fail := func(err error) error {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		return fail(err)
+	}
+	if _, err := f.Write(data); err != nil {
+		return fail(fmt.Errorf("write %s: %w", path, err))
+	}
+	if !skipSync {
+		if err := f.Sync(); err != nil {
+			return fail(fmt.Errorf("sync %s: %w", path, err))
+		}
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // process-wide guard: flock does not serialize on Windows in this repo.
@@ -104,7 +150,7 @@ func writeRegistry(path string, recs []Record) error {
 	if err != nil {
 		return err
 	}
-	return config.WriteFileAtomic(path, append(b, '\n'))
+	return writeAtomic(path, append(b, '\n'))
 }
 
 // loadKubeconfig returns an empty config when the file is missing or empty and an error
@@ -135,7 +181,7 @@ func saveKubeconfig(path string, cfg *api.Config) error {
 	if err != nil {
 		return fmt.Errorf("encode kubeconfig: %w", err)
 	}
-	return config.WriteFileAtomic(path, b)
+	return writeAtomic(path, b)
 }
 
 // isPaletteExec reports whether u is only an exec call to kubectl-palette token, and
@@ -313,48 +359,39 @@ func pickUser(cfg *api.Config, recs []Record, tenant string) string {
 	}
 }
 
-// Upsert records the cluster e in the registry and adds or refreshes its cluster, user and
-// context entries in the kubeconfig at kubeconfigPath. source holds the bytes of the
-// plugin's per-cluster kubeconfig. It returns the record, including the context name to
-// pass to `kubectl --context`.
-//
-// It returns an error and writes nothing when the source user has any credential besides
-// an exec call to `kubectl-palette token [--tenant <name>]`, or when the tenant named in
-// those args differs from e.Tenant (an empty Tenant means "default"). The context name is
-// chosen once per (Tenant, UID) and kept afterwards. A missing kubeconfig is created
-// (mode 600). An existing context's namespace is kept. current-context is never changed.
-func Upsert(kubeconfigPath, registryPath string, e Entry, source []byte, now time.Time) (Record, error) {
+// Item is one cluster for UpsertAll: its identity and the bytes of the plugin's
+// per-cluster kubeconfig.
+type Item struct {
+	Entry  Entry
+	Source []byte
+}
+
+// Result is the outcome of one Item. Err is set when the item was refused or skipped.
+type Result struct {
+	Record Record
+	Err    error
+}
+
+// upsertOne applies one item to cfg and recs in memory. It changes neither when it returns
+// an error. It returns the new record list.
+func upsertOne(cfg *api.Config, recs []Record, e Entry, source []byte, now time.Time) (Record, []Record, error) {
 	e.Tenant = normTenant(e.Tenant)
 	if e.UID == "" || e.Cluster == "" {
-		return Record{}, errors.New("entry needs a cluster name and UID")
+		return Record{}, recs, errors.New("entry needs a cluster name and UID")
 	}
 	srcCluster, srcUser, srcNS, err := parseSource(source)
 	if err != nil {
-		return Record{}, err
+		return Record{}, recs, err
 	}
 	tenant, err := isPaletteExec(srcUser)
 	if err != nil {
-		return Record{}, fmt.Errorf("refusing to copy cluster %q into the kubeconfig: %w", e.Cluster, err)
+		return Record{}, recs, fmt.Errorf("refusing to copy cluster %q into the kubeconfig: %w", e.Cluster, err)
 	}
 	if tenant != e.Tenant {
-		return Record{}, fmt.Errorf("refusing to copy cluster %q: exec args name tenant %q, entry is tenant %q", e.Cluster, tenant, e.Tenant)
+		return Record{}, recs, fmt.Errorf("refusing to copy cluster %q: exec args name tenant %q, entry is tenant %q", e.Cluster, tenant, e.Tenant)
 	}
 
-	unlock, err := lockRegistry(registryPath)
-	if err != nil {
-		return Record{}, err
-	}
-	defer unlock()
-
-	recs, err := readRegistry(registryPath)
-	if err != nil {
-		return Record{}, err
-	}
-	cfg, err := loadKubeconfig(kubeconfigPath)
-	if err != nil {
-		return Record{}, err
-	}
-
+	recs = append([]Record(nil), recs...)
 	var rec Record
 	if i := findRecord(recs, e.Tenant, e.UID); i >= 0 {
 		rec = recs[i]
@@ -378,11 +415,6 @@ func Upsert(kubeconfigPath, registryPath string, e Entry, source []byte, now tim
 			rec.Context = pickContext(cfg, recs, e)
 		}
 	}
-	// The record's own names are not taken by anyone else, but a hand-made foreign entry
-	// that appeared under the same name must not be overwritten.
-	if rec.Context == "" {
-		rec.Context = pickContext(cfg, recs, e)
-	}
 	rec.User = pickUser(cfg, append(append([]Record{}, recs...), rec), e.Tenant)
 
 	cl := srcCluster.DeepCopy()
@@ -390,34 +422,94 @@ func Upsert(kubeconfigPath, registryPath string, e Entry, source []byte, now tim
 	cfg.Clusters[rec.Context] = cl
 
 	ex := srcUser.Exec
-	cfg.AuthInfos[rec.User] = &api.AuthInfo{Exec: &api.ExecConfig{
+	au := &api.AuthInfo{Exec: &api.ExecConfig{
 		APIVersion:      ex.APIVersion,
 		Command:         ex.Command,
 		Args:            append([]string(nil), ex.Args...),
 		InteractiveMode: ex.InteractiveMode,
 		InstallHint:     ex.InstallHint,
 	}}
-	if cfg.AuthInfos[rec.User].Exec.APIVersion == "" {
-		cfg.AuthInfos[rec.User].Exec.APIVersion = "client.authentication.k8s.io/v1beta1"
+	if au.Exec.APIVersion == "" {
+		au.Exec.APIVersion = "client.authentication.k8s.io/v1beta1"
 	}
-	if cfg.AuthInfos[rec.User].Exec.InteractiveMode == "" {
-		cfg.AuthInfos[rec.User].Exec.InteractiveMode = api.IfAvailableExecInteractiveMode
+	if au.Exec.InteractiveMode == "" {
+		au.Exec.InteractiveMode = api.IfAvailableExecInteractiveMode
 	}
+	cfg.AuthInfos[rec.User] = au
 
 	ns := srcNS
 	if old := cfg.Contexts[rec.Context]; old != nil && old.Cluster == rec.Context {
 		ns = old.Namespace
 	}
 	cfg.Contexts[rec.Context] = &api.Context{Cluster: rec.Context, AuthInfo: rec.User, Namespace: ns}
+	return rec, append(recs, rec), nil
+}
 
-	recs = append(recs, rec)
+// UpsertAll applies every item under one lock with one kubeconfig load, one registry load
+// and one write of each file at the end. It returns one Result per item, in order. A refused
+// or unparseable item sets its Result's Err and is skipped; the rest still apply, and names
+// chosen for earlier items are taken for later ones. The error is for whole-operation
+// failures (lock, unparseable kubeconfig or registry, write failure); then nothing is
+// written. When no item succeeds, nothing is written. The rules for each item are those of
+// Upsert.
+func UpsertAll(kubeconfigPath, registryPath string, items []Item, now time.Time) ([]Result, error) {
+	results := make([]Result, len(items))
+	if len(items) == 0 {
+		return results, nil
+	}
+	unlock, err := lockRegistry(registryPath)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	recs, err := readRegistry(registryPath)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := loadKubeconfig(kubeconfigPath)
+	if err != nil {
+		return nil, err
+	}
+	ok := 0
+	for i, it := range items {
+		rec, next, err := upsertOne(cfg, recs, it.Entry, it.Source, now)
+		if err != nil {
+			results[i].Err = err
+			continue
+		}
+		recs = next
+		results[i].Record = rec
+		ok++
+	}
+	if ok == 0 {
+		return results, nil
+	}
 	if err := writeRegistry(registryPath, recs); err != nil {
-		return Record{}, err
+		return nil, err
 	}
 	if err := saveKubeconfig(kubeconfigPath, cfg); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// Upsert records the cluster e in the registry and adds or refreshes its cluster, user and
+// context entries in the kubeconfig at kubeconfigPath. source holds the bytes of the
+// plugin's per-cluster kubeconfig. It returns the record, including the context name to
+// pass to `kubectl --context`. It is UpsertAll with one item.
+//
+// It returns an error and writes nothing when the source user has any credential besides
+// an exec call to `kubectl-palette token [--tenant <name>]`, or when the tenant named in
+// those args differs from e.Tenant (an empty Tenant means "default"). The context name is
+// chosen once per (Tenant, UID) and kept afterwards. A missing kubeconfig is created
+// (mode 600). An existing context's namespace is kept. current-context is never changed.
+func Upsert(kubeconfigPath, registryPath string, e Entry, source []byte, now time.Time) (Record, error) {
+	res, err := UpsertAll(kubeconfigPath, registryPath, []Item{{Entry: e, Source: source}}, now)
+	if err != nil {
 		return Record{}, err
 	}
-	return rec, nil
+	return res[0].Record, res[0].Err
 }
 
 // removeRecords deletes the kubeconfig entries of every record in drop (by index into recs)
