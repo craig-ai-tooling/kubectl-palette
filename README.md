@@ -141,7 +141,7 @@ When contexts are added:
 - The first time a context is added the plugin prints `added context <name> to <file>`.
 
 ```
-kubectl palette contexts                      # context, tenant, project/cluster
+kubectl palette contexts                      # context, tenant, project/cluster (and the file, if not the current one)
 kubectl palette contexts add web api          # by name, as for use
 kubectl palette contexts add --all            # every cluster of the selected tenant
 kubectl palette contexts remove web           # by context name
@@ -155,7 +155,24 @@ that terminal cannot drift to another cluster. The contexts serve every other te
 `kubectl palette use --unset` puts a pinned terminal back on your own kubeconfig.
 
 `logout` removes the tenant's contexts. `logout --keep-contexts` leaves them and
-`logout --all` removes every one. A session that merely expires leaves them in place.
+`logout --all` removes every one for the current context file, also when no tenant is saved.
+A session that merely expires leaves them in place.
+
+Each context's user runs `kubectl-palette token --tenant <name> --issuer-id <id>`. The id
+names the Palette login the context was made for. If a tenant entry later holds another
+login, `token` prints nothing and says so, and `kubectl palette contexts prune` removes the
+stale contexts. Contexts left behind by `logout --keep-contexts` are removed when a login
+creates a new entry of the same name.
+
+Limits:
+
+- `$KUBECONFIG` is not consulted. If it is set and does not list the context file, kubectl in
+  that shell will not see the contexts, and the plugin prints one note saying so.
+- kubectl's own writes (`kubectl config set-context` and the like) are not coordinated with
+  the plugin's. Two writes at the same moment can lose one. Run the plugin's commands and
+  kubectl's config commands one at a time.
+- The paste-back login has no PKCE, because Palette's discovery document advertises none.
+  The code is protected only by the state check and its short life.
 
 Turn contexts off with `KUBECTL_PALETTE_NO_CONTEXTS=1`, or per call with `login --no-contexts`,
 `use --no-context` and `exec --no-context`. `KUBECTL_PALETTE_CONTEXT_FILE` writes them to

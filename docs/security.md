@@ -47,11 +47,21 @@ file paths.
 
 ### 3a. Tenant entries
 - `token` with no flag always means the `default` entry, never the active one, and never
-  reads `KUBECTL_PALETTE_TENANT`. A named entry's cluster files call `token --tenant <name>`.
+  reads `KUBECTL_PALETTE_TENANT`. A named entry's cluster files call
+  `token --tenant <name> --issuer-id <id>`.
   A cluster file must not be able to send one tenant's token to a cluster in another
   tenant because the active entry changed.
-- Entry names are validated (`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`, not `default`) before
-  they become a directory name. `.tenants` is rejected as a project or cluster name.
+- Entry names are validated (`^[a-z0-9][a-z0-9._-]{0,62}$`, no trailing dot, not `default`)
+  before they become a directory name. They are lowercase so two names can never be one
+  directory on a case-insensitive filesystem. `.tenants` is rejected as a project or
+  cluster name.
+- Every rewritten file carries `--issuer-id <id>` (`config.IssuerID`: first 16 hex of the
+  SHA-256 of the issuer, trailing slashes trimmed). `token` prints nothing and fails when
+  the id differs from the entry's saved issuer, and when a named entry gives no id. A
+  tenant name that is reused for another Palette therefore cannot receive tokens for the
+  old clusters, even if their contexts were kept by `logout --keep-contexts`.
+- `Resolve` with `--tenant <org>` requires the org host's reply to name that org
+  (case-insensitive).
 - A `--server` login calls only unauthenticated endpoints before the browser step. The
   issuer it reads from discovery must be https (or loopback) and its host must be the
   server host, the root domain or a subdomain of the root domain, else the login stops.
@@ -67,8 +77,18 @@ It is the only code that writes there.
   impersonation. Admin kubeconfigs therefore can never land in the file, and the cli
   never even reads an admin file for this.
 - The exec block must run exactly `kubectl-palette` (no path), with no env, and args
-  `token` or `token --tenant <name>` and nothing else. A source with any other argument is
-  refused. The tenant named in the args must equal the entry the cluster belongs to.
+  `token [--tenant <name>] [--issuer-id <id>]` and nothing else. A source with any other
+  argument is refused. The tenant must equal the entry the cluster belongs to, and a
+  non-empty issuer id on the entry must equal the one in the args.
+- A user entry is reused only when its args name the same tenant and issuer id, and no
+  record of another tenant or issuer uses it. A context and cluster name of an existing
+  record is reused only while the context still points at our cluster and user, or neither
+  exists. Otherwise the record is dropped and a fresh name is chosen.
+- A cluster entry is deleted only when no remaining context references it, like a user entry.
+- Records store the absolute path of the kubeconfig they were written to and apply only to
+  that file.
+- The registry is written before the kubeconfig. If the kubeconfig write fails the previous
+  registry is put back.
 - The plugin records what it created in `<Home>/contexts.json`. It never changes or removes
   a cluster, context or user that is not in that registry. A context the user re-pointed is
   left alone on removal and only dropped from the registry. A user entry that is not a
@@ -79,8 +99,15 @@ It is the only code that writes there.
   the registry and the kubeconfig through a mode-600 temp file and a rename. A symlinked
   kubeconfig is written through to its target.
 - A failure to record never fails the command that triggered it.
-- `token --tenant <name>` is what pins a context to its tenant. A context from tenant A
-  cannot ask for tenant B's token, and plain `token` is always the default entry.
+- Known limits. `$KUBECONFIG` is not consulted when choosing the context file or free names;
+  when it is set and does not list the file, the plugin prints one note, because kubectl in
+  that shell will not see the contexts. kubectl's own config writes are not coordinated with
+  the plugin's registry lock, so a concurrent `kubectl config set-context` can lose an
+  update. The paste-back login has no PKCE because Palette's discovery document advertises
+  none, so the code is protected only by the state check and its short life.
+- `token --tenant <name> --issuer-id <id>` is what pins a context to its tenant and login. A
+  context from tenant A cannot ask for tenant B's token, and plain `token` is always the
+  default entry.
 - `KUBECTL_PALETTE_NO_CONTEXTS=1` turns it all off. Tests must keep the context file in
   `t.TempDir()`: a `Paths` with no context file disables the feature, and the cli tests
   run with `HOME` in a throwaway directory and fail if anything appears under it.

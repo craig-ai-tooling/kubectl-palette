@@ -73,8 +73,16 @@ When.
   `list` and `remove --all-tenants`, which cover every entry. `prune` rebuilds the index and
   removes the entry's records whose cluster is gone.
 - `logout` removes the entry's contexts, `--keep-contexts` leaves them, `logout --all`
-  removes every one. The legacy issuer-change wipe removes the entry's contexts too. A
-  session that only expires leaves them.
+  removes every one for the current context file, also when no entry is saved. The legacy
+  issuer-change wipe removes the entry's contexts too. A session that only expires leaves
+  them.
+- A login that creates a brand-new entry first removes any records and contexts left under
+  that name, and says so in one line. `contexts remove --all --tenant X` and `contexts prune`
+  also work for a tenant name that has records but no saved entry, and prune removes records
+  whose entry now holds another login.
+- Records carry the absolute path of the kubeconfig they were written to and apply only to
+  that file, so changing `KUBECTL_PALETTE_CONTEXT_FILE` never lets old records claim entries
+  in the new file.
 
 Why `use` stays. It points `KUBECONFIG` at one per-cluster file the plugin owns, so a
 terminal pinned to a cluster cannot drift: no `use-context` elsewhere and no edit of the
@@ -117,7 +125,7 @@ Layout. The entry `default` is the original flat layout and needs no migration:
 `<Home>/config.json`, `session.json`, `index.json`, and cluster files at
 `<KubeDir>/<project>/<cluster>.yaml`. A named entry lives in `<Home>/tenants/<name>/` and
 `<KubeDir>/.tenants/<name>/<project>/<cluster>.yaml`. `<Home>/active` holds the active
-entry name. Entry names match `^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$` and cannot be
+entry name. Entry names are lowercase, match `^[a-z0-9][a-z0-9._-]{0,62}$`, cannot end in a dot, and cannot be
 `default` for a named entry. `.tenants` is reserved like `.admin`, so no project can
 collide with it.
 
@@ -132,8 +140,14 @@ active marker is ignored.
 
 `token` is different. With no flag it always means `default`, never the active entry, and
 `token --tenant <name>` means exactly that entry. Cluster files written for a named entry
-carry `args: [token, --tenant, <name>]`. A cluster file therefore never sends one tenant's
-token to a cluster in another tenant, whatever is active when kubectl runs.
+carry `args: [token, --tenant, <name>, --issuer-id, <id>]`. The id is the first 16 hex
+characters of the SHA-256 of the entry's issuer with trailing slashes removed. `token`
+refuses, and prints no token, when the id differs from the entry's saved issuer, and refuses
+a named entry that gives no id. Plain `token` (files from v0.1.0) stays valid for the default
+entry. A cluster file therefore never sends one tenant's token to a cluster in another
+tenant, whatever is active when kubectl runs, and a tenant name reused for another Palette
+cannot serve its token to the old clusters. A name typed with capitals is matched to the
+lowercase entry; a new entry named from an org gets the lowercased org name.
 
 ### Resolving a server and tenant
 
