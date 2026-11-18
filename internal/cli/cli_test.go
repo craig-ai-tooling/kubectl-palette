@@ -401,7 +401,7 @@ func TestUsePicker(t *testing.T) {
 	h := newHarness(t, time.Now().Add(time.Hour))
 	h.a.StdinIsTTY = true
 	h.a.Stdin = strings.NewReader("2\n")
-	code, out, e := h.run("use", "--print-env")
+	code, out, e := h.run("use", "--print-env", "--no-fuzzy")
 	if code != 0 || !strings.Contains(out, "beta.yaml") || !strings.Contains(e, "1  Default/alpha") {
 		t.Fatalf("%d %q %q", code, out, e)
 	}

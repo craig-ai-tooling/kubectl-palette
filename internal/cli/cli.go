@@ -22,6 +22,7 @@ import (
 	"github.com/craig-ai-tooling/kubectl-palette/internal/kubeconfig"
 	"github.com/craig-ai-tooling/kubectl-palette/internal/oidc"
 	"github.com/craig-ai-tooling/kubectl-palette/internal/palette"
+	"github.com/craig-ai-tooling/kubectl-palette/internal/picker"
 	"github.com/craig-ai-tooling/kubectl-palette/internal/session"
 	"github.com/craig-ai-tooling/kubectl-palette/internal/shell"
 )
@@ -49,19 +50,27 @@ type App struct {
 	SpawnShell func(kubeconfigPath string) error
 	// LoginPorts overrides the loopback ports, for tests.
 	LoginPorts []int
+	// Pick opens the fuzzy finder. Tests replace it; the default is picker.Pick.
+	Pick func(items []picker.Item) (int, error)
+	// Exe is the path the plugin was started as (not symlink-resolved) and RealExe the
+	// resolved binary. completion install links next to Exe, or to RealExe under --dir.
+	Exe, RealExe string
+	// LookPath finds an executable on PATH; the default is exec.LookPath.
+	LookPath func(string) (string, error)
 }
 
 const usage = `usage: kubectl palette <command>
 
 commands:
   login        log in through the browser (--from-kubeconfig <file> the first time)
-  use          target a cluster in this terminal: use [name] [--admin]
+  use          target a cluster in this terminal: use [name] [--admin] [--no-fuzzy]
   exec         run kubectl against a cluster once: exec <name> [--admin] -- <args>
   current      show the cluster and mode for this terminal
   sync         rebuild the local cluster index
   logout       delete the session, the index and admin kubeconfigs
   token        exec-credential plugin used by the kubeconfigs
   shell-init   print the shell hook: shell-init zsh|bash
+  completion   tab completion for kubectl: completion install [--dir <dir>]
   version      print the version
 `
 
@@ -106,6 +115,10 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = a.logout()
 	case "shell-init":
 		err = a.shellInit(rest)
+	case "completion":
+		err = a.completion(rest)
+	case "__complete":
+		a.complete(rest)
 	case "help", "-h", "--help":
 		fmt.Fprint(a.Stdout, usage)
 	default:
@@ -224,6 +237,9 @@ func (a *App) buildIndex(ctx context.Context) (*index.Index, error) {
 	idx, err := index.Build(ctx, c, a.now())
 	if err != nil {
 		return nil, err
+	}
+	if old, lerr := index.Load(a.Paths.IndexFile()); lerr == nil {
+		idx.CarryOver(old)
 	}
 	if err := idx.Save(a.Paths.IndexFile()); err != nil {
 		return nil, fmt.Errorf("save index: %w", err)
@@ -463,6 +479,7 @@ func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin bool)
 	} else {
 		raw, err = cl.KubeconfigClient(ctx, c.UID, c.ProjectUID)
 		if errors.Is(err, palette.ErrNotFound) {
+			a.recordOIDC(c.UID, true)
 			msg := fmt.Sprintf("%s has no OIDC configured, so there is no OIDC kubeconfig for it.", c.Ref())
 			if c.CanAdmin() {
 				msg += fmt.Sprintf(" You can use the admin kubeconfig: kubectl palette use %s --admin", c.Ref())
@@ -471,6 +488,9 @@ func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin bool)
 		}
 		if err != nil {
 			return "", false, fmt.Errorf("fetch kubeconfig for %s: %w", c.Ref(), err)
+		}
+		if c.NoOIDC {
+			a.recordOIDC(c.UID, false)
 		}
 		cfg, cerr := a.Paths.Load()
 		if cerr != nil {
@@ -488,10 +508,21 @@ func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin bool)
 	return path, true, nil
 }
 
+// recordOIDC remembers in the index whether a cluster has OIDC. A failed write is not
+// worth failing the command for: the flag is only a hint for the picker.
+func (a *App) recordOIDC(uid string, none bool) {
+	idx, err := index.Load(a.Paths.IndexFile())
+	if err != nil || !idx.SetNoOIDC(uid, none) {
+		return
+	}
+	_ = idx.Save(a.Paths.IndexFile())
+}
+
 func (a *App) use(ctx context.Context, args []string) error {
 	fs := newFlags("use", a.Stderr)
 	admin := fs.Bool("admin", false, "use the admin kubeconfig (needs the download permission)")
 	printEnv := fs.Bool("print-env", false, "print an export line for the shell hook")
+	noFuzzy := fs.Bool("no-fuzzy", false, "with no name, use a numbered list instead of the fuzzy finder")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return exitError(2)
@@ -510,7 +541,7 @@ func (a *App) use(ctx context.Context, args []string) error {
 			return err
 		}
 	} else {
-		c, err = a.pick(idx)
+		c, err = a.pick(idx, *noFuzzy)
 		if err != nil {
 			return err
 		}
@@ -541,8 +572,9 @@ func (a *App) use(ctx context.Context, args []string) error {
 	return a.SpawnShell(path)
 }
 
-// pick chooses a cluster without a name: the only cluster, or a numbered list on a TTY.
-func (a *App) pick(idx *index.Index) (index.Cluster, error) {
+// pick chooses a cluster without a name: the only cluster, the fuzzy finder on a TTY, or
+// a numbered list when the finder is off or cannot start.
+func (a *App) pick(idx *index.Index, noFuzzy bool) (index.Cluster, error) {
 	switch len(idx.Clusters) {
 	case 0:
 		return index.Cluster{}, errors.New("the index has no clusters: run: kubectl palette sync")
@@ -552,8 +584,48 @@ func (a *App) pick(idx *index.Index) (index.Cluster, error) {
 	if !a.StdinIsTTY {
 		return index.Cluster{}, errors.New("name a cluster: kubectl palette use <name>")
 	}
+	if !noFuzzy {
+		pk := a.Pick
+		if pk == nil {
+			pk = picker.Pick
+		}
+		n, err := pk(pickerItems(idx))
+		switch {
+		case err == nil:
+			return idx.Clusters[n], nil
+		case errors.Is(err, picker.ErrAborted):
+			return index.Cluster{}, err
+		}
+		fmt.Fprintf(a.Stderr, "fuzzy finder unavailable (%v), using a numbered list\n", err)
+	}
+	return a.pickNumbered(idx)
+}
+
+// pickerItems labels each cluster project/cluster, then its status words.
+func pickerItems(idx *index.Index) []picker.Item {
+	items := make([]picker.Item, len(idx.Clusters))
 	for i, c := range idx.Clusters {
-		fmt.Fprintf(a.Stderr, "%4d  %s\n", i+1, c.Ref())
+		label := c.Ref()
+		oidc, admin := "oidc ok or not yet known", "no"
+		if c.NoOIDC {
+			label += "  no-oidc"
+			oidc = "none (use --admin)"
+		}
+		if c.CanAdmin() {
+			label += "  admin"
+			admin = "yes"
+		}
+		items[i] = picker.Item{
+			Label:  label,
+			Detail: fmt.Sprintf("project: %s\ncluster: %s\noidc: %s\nadmin kubeconfig: %s", c.Project, c.Name, oidc, admin),
+		}
+	}
+	return items
+}
+
+func (a *App) pickNumbered(idx *index.Index) (index.Cluster, error) {
+	for i, c := range idx.Clusters {
+		fmt.Fprintf(a.Stderr, "%4d  %s%s\n", i+1, c.Ref(), statusWords(c))
 	}
 	fmt.Fprint(a.Stderr, "number or name: ")
 	var in string
@@ -565,6 +637,17 @@ func (a *App) pick(idx *index.Index) (index.Cluster, error) {
 		return idx.Clusters[n-1], nil
 	}
 	return idx.Resolve(in)
+}
+
+func statusWords(c index.Cluster) string {
+	var s string
+	if c.NoOIDC {
+		s += "  no-oidc"
+	}
+	if c.CanAdmin() {
+		s += "  admin"
+	}
+	return s
 }
 
 // --- exec ---
@@ -673,6 +756,10 @@ func (a *App) shellInit(args []string) error {
 		return err
 	}
 	fmt.Fprint(a.Stdout, s)
+	if !a.completerInstalled() {
+		// stderr, because stdout is eval'd by the shell.
+		fmt.Fprintln(a.Stderr, "kubectl-palette: tab completion is off. Run: kubectl palette completion install")
+	}
 	return nil
 }
 

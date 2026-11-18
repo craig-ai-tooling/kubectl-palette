@@ -31,6 +31,9 @@ type Cluster struct {
 	ProjectUID  string   `json:"project_uid"`
 	Project     string   `json:"project"`
 	Permissions []string `json:"permissions,omitempty"`
+	// NoOIDC is set when a kubeconfig fetch found no OIDC on the cluster. The metadata
+	// listing does not say, so the index learns it on first use.
+	NoOIDC bool `json:"no_oidc,omitempty"`
 }
 
 // CanAdmin reports whether the caller may download this cluster's admin kubeconfig.
@@ -116,6 +119,34 @@ func deleted(m palette.ClusterMeta) bool {
 	}
 	// Palette sends the zero time for live objects.
 	return m.Deletion != "" && !strings.HasPrefix(m.Deletion, "0001-")
+}
+
+// CarryOver copies what the index learned on first use from an older index, matched by
+// cluster uid, because a rebuild from the metadata listing cannot know it.
+func (i *Index) CarryOver(prev *Index) {
+	if prev == nil {
+		return
+	}
+	no := make(map[string]bool, len(prev.Clusters))
+	for _, c := range prev.Clusters {
+		if c.NoOIDC {
+			no[c.UID] = true
+		}
+	}
+	for n := range i.Clusters {
+		i.Clusters[n].NoOIDC = no[i.Clusters[n].UID]
+	}
+}
+
+// SetNoOIDC records whether a cluster has OIDC and reports whether the entry changed.
+func (i *Index) SetNoOIDC(uid string, no bool) bool {
+	for n := range i.Clusters {
+		if i.Clusters[n].UID == uid && i.Clusters[n].NoOIDC != no {
+			i.Clusters[n].NoOIDC = no
+			return true
+		}
+	}
+	return false
 }
 
 // Stale reports whether the index is older than StaleAfter.

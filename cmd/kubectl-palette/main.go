@@ -21,6 +21,12 @@ func main() {
 		os.Exit(1)
 	}
 	self, _ := os.Executable()
+	args := os.Args[1:]
+	// kubectl completes plugin arguments by running kubectl_complete-palette, so the
+	// binary answers completion when started under that name (a symlink is enough).
+	if cli.IsCompleterName(os.Args[0]) {
+		args = append([]string{"__complete"}, args...)
+	}
 	app := &cli.App{
 		Version: version, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
 		Getenv: os.Getenv, Paths: paths,
@@ -29,8 +35,9 @@ func main() {
 		SpawnSync:   func() error { return cli.SpawnBackgroundSync(self) },
 		RunKubectl:  cli.RunKubectlDefault,
 		SpawnShell:  cli.SpawnShellDefault,
+		Exe:         os.Args[0], RealExe: self,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	os.Exit(app.Run(ctx, os.Args[1:]))
+	os.Exit(app.Run(ctx, args))
 }
