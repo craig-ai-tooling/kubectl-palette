@@ -18,12 +18,12 @@ the `Authorization` header; the ID token is for clusters only.
 
 ## Tasks
 
-- [ ] 1. Config and token store (mode 600 files under the user's home)
-- [ ] 2. OIDC browser login and the `token` exec-credential command
-- [ ] 3. Cluster index from the metadata endpoint, with background refresh
-- [ ] 4. `use` with kubeconfig fetch-and-cache, and the shell-init hook for zsh and bash
-- [ ] 5. `exec`, `current` and `logout`
-- [ ] 6. `--admin`
+- [x] 1. Config and token store (mode 600 files under the user's home)
+- [x] 2. OIDC browser login and the `token` exec-credential command
+- [x] 3. Cluster index from the metadata endpoint, with background refresh
+- [x] 4. `use` with kubeconfig fetch-and-cache, and the shell-init hook for zsh and bash
+- [x] 5. `exec`, `current` and `logout`
+- [x] 6. `--admin`
 - [ ] 7. Completion and the fuzzy picker
 - [ ] 8. goreleaser and the krew manifest
 
