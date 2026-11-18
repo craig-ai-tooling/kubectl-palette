@@ -165,3 +165,64 @@ func TestExpiry(t *testing.T) {
 		}
 	}
 }
+
+// Logout must wait for an in-flight refresh and win: the refresh may not save a session
+// after Delete has returned.
+func TestDeleteWaitsForRefreshAndWins(t *testing.T) {
+	now := time.Now()
+	gate := make(chan struct{})
+	started := make(chan struct{})
+	r := &blockingRefresher{now: now, gate: gate, started: started}
+	m := newMgr(t, r, now)
+	if err := m.Save(Session{IDToken: jwt(now.Add(-time.Hour), "old"), RefreshToken: "rt-0", IDExpiry: now.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	refreshDone := make(chan error, 1)
+	go func() { _, _, err := m.IDToken(context.Background()); refreshDone <- err }()
+	<-started
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- m.Delete() }()
+	select {
+	case <-deleteDone:
+		t.Fatal("Delete returned while a refresh held the lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(gate)
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-deleteDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Load(); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("a refresh resurrected the session after logout: %v", err)
+	}
+}
+
+// A refresh that starts after Delete must find no session and save nothing.
+func TestRefreshAfterDeleteSavesNothing(t *testing.T) {
+	now := time.Now()
+	fr := &fakeRefresher{now: now, current: "rt-0"}
+	m := newMgr(t, fr, now)
+	m.Save(Session{IDToken: jwt(now.Add(-time.Hour), "old"), RefreshToken: "rt-0", IDExpiry: now.Add(-time.Hour)})
+	if err := m.Delete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.IDToken(context.Background()); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := os.Stat(m.File); err == nil {
+		t.Fatal("session file recreated")
+	}
+}
+
+type blockingRefresher struct {
+	now           time.Time
+	gate, started chan struct{}
+}
+
+func (b *blockingRefresher) Refresh(_ context.Context, _ string) (string, string, error) {
+	close(b.started)
+	<-b.gate
+	return jwt(b.now.Add(time.Hour), "new"), "rt-1", nil
+}

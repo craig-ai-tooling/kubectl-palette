@@ -89,12 +89,17 @@ func (m *Manager) Save(s Session) error {
 	return config.WriteFileAtomic(m.File, b)
 }
 
-// Delete removes the session file.
+// Delete removes the session file under the same lock a refresh holds, so a refresh that
+// is in flight finishes first and cannot save a fresh session after Delete returns. The
+// lock file stays: unlinking it would let a waiter lock a different inode.
 func (m *Manager) Delete() error {
-	for _, p := range []string{m.File, m.LockPath} {
-		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
+	lk, err := LockFile(m.LockPath)
+	if err != nil {
+		return fmt.Errorf("lock session: %w", err)
+	}
+	defer lk.Unlock()
+	if err := os.Remove(m.File); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	return nil
 }
