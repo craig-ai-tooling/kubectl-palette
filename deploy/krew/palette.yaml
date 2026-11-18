@@ -1,0 +1,74 @@
+# Krew manifest template. Do not edit the @...@ values by hand: run
+#   hack/krew-manifest.sh <version> <base-url> [checksums-file]
+# which fills the version, URIs and sha256 values from the goreleaser checksums file.
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: palette
+spec:
+  version: @VERSION@
+  homepage: https://github.com/craig-ai-tooling/kubectl-palette
+  shortDescription: Target Spectro Palette clusters by name
+  description: |
+    Log in once through the browser with Spectro Cloud Palette's OIDC provider,
+    then name a cluster and run plain kubectl against it. Each terminal gets its
+    own single-cluster kubeconfig under ~/.kube/palette, so there are no contexts
+    to manage and ~/.kube/config is never touched. A local index of cluster names
+    keeps tab completion and the cluster picker fast for one cluster or a thousand.
+    Commands: login, use, exec, current, sync, logout.
+  caveats: |
+    First login:
+      kubectl palette login --from-kubeconfig <an-OIDC-kubeconfig-from-Palette>
+    This opens a browser once and builds the local cluster index.
+
+    Shell hook, so that "kubectl palette use <cluster>" sets KUBECONFIG in the
+    current terminal (add to ~/.zshrc or ~/.bashrc):
+      eval "$(kubectl-palette shell-init zsh)"     # or bash
+    Without the hook, "use" opens a subshell. "kubectl palette exec <cluster> -- <args>"
+    needs no hook.
+
+    Tab completion of cluster names (kubectl 1.26 or newer):
+      kubectl palette completion install
+  platforms:
+  - selector:
+      matchLabels:
+        os: linux
+        arch: amd64
+    uri: @URI_linux_amd64@
+    sha256: @SHA256_linux_amd64@
+    bin: kubectl-palette
+  - selector:
+      matchLabels:
+        os: linux
+        arch: arm64
+    uri: @URI_linux_arm64@
+    sha256: @SHA256_linux_arm64@
+    bin: kubectl-palette
+  - selector:
+      matchLabels:
+        os: darwin
+        arch: amd64
+    uri: @URI_darwin_amd64@
+    sha256: @SHA256_darwin_amd64@
+    bin: kubectl-palette
+  - selector:
+      matchLabels:
+        os: darwin
+        arch: arm64
+    uri: @URI_darwin_arm64@
+    sha256: @SHA256_darwin_arm64@
+    bin: kubectl-palette
+  - selector:
+      matchLabels:
+        os: windows
+        arch: amd64
+    uri: @URI_windows_amd64@
+    sha256: @SHA256_windows_amd64@
+    bin: kubectl-palette.exe
+  - selector:
+      matchLabels:
+        os: windows
+        arch: arm64
+    uri: @URI_windows_arm64@
+    sha256: @SHA256_windows_arm64@
+    bin: kubectl-palette.exe
