@@ -85,14 +85,17 @@ func (a *App) login(ctx context.Context, args []string) error {
 			}
 		}
 	case f.tenant != "":
-		if !contains(entries, f.tenant) {
+		m, ok := config.MatchEntry(entries, f.tenant)
+		if !ok {
 			return fmt.Errorf("no saved tenant %q (saved: %s). To add it, run: kubectl palette login --server <url> --tenant %s", f.tenant, strings.Join(entries, ", "), f.tenant)
 		}
-		name = f.tenant
+		name = m
 	case name != "":
-		if !contains(entries, name) {
+		m, ok := config.MatchEntry(entries, name)
+		if !ok {
 			return unknownEntryErr(name, entries)
 		}
+		name = m
 	default:
 		n, err := a.pickEntry("")
 		if err != nil {
@@ -150,7 +153,7 @@ func (a *App) loginSaved(ctx context.Context, root config.Paths, f loginFlags) e
 	}
 	// A different issuer is a different Palette installation. Keeping the saved API URL would
 	// send the new refresh token to the old one, so derive it again.
-	issuerChanged := oldIssuer != "" && cfg.Issuer != oldIssuer
+	issuerChanged := oldIssuer != "" && !sameIssuer(cfg.Issuer, oldIssuer)
 	if issuerChanged {
 		cfg.Org, cfg.Server = "", ""
 		if !apiExplicit {
@@ -220,6 +223,13 @@ func (a *App) browserLogin(ctx context.Context, cfg config.Config, hc *http.Clie
 
 // finishLogin saves the entry a.Paths points at, makes it active and builds its index.
 func (a *App) finishLogin(ctx context.Context, root config.Paths, cfg config.Config, sess session.Session, noContexts bool) error {
+	if !contains(root.Entries(), a.Paths.Entry()) {
+		// A brand-new entry. Contexts left from an earlier entry of the same name belong to
+		// another login and must not be reachable through this one.
+		if n := a.removeEntryContexts(a.Paths.Entry()); n > 0 {
+			fmt.Fprintf(a.Stderr, "removed %s left from an earlier tenant entry named %s\n", plural(n, "context", "contexts"), a.Paths.Entry())
+		}
+	}
 	if err := a.Paths.Save(cfg); err != nil {
 		return err
 	}
@@ -282,7 +292,8 @@ func (a *App) loginServer(ctx context.Context, root config.Paths, f loginFlags) 
 		}
 	}
 	if name == "" {
-		name = res.Org
+		// Entry names are lowercase: they become directory names.
+		name = strings.ToLower(res.Org)
 	}
 	if name != "" {
 		if err := checkEntry(root, name, cfg.Issuer); err != nil {
@@ -298,7 +309,7 @@ func (a *App) loginServer(ctx context.Context, root config.Paths, f loginFlags) 
 		name = config.DefaultEntry
 		c := &palette.Client{BaseURL: cfg.APIURL, HTTP: hc, Token: func() (string, error) { return sess.RefreshToken, nil }}
 		if me, err := c.Me(ctx); err == nil && me.OrgName != "" {
-			name, cfg.Org = me.OrgName, me.OrgName
+			name, cfg.Org = strings.ToLower(me.OrgName), me.OrgName
 		}
 		if err := checkEntry(root, name, cfg.Issuer); err != nil {
 			return err
@@ -322,7 +333,7 @@ func checkEntry(root config.Paths, name, issuer string) error {
 	if err != nil {
 		return err
 	}
-	if old.Issuer != issuer {
+	if !sameIssuer(old.Issuer, issuer) {
 		return fmt.Errorf("tenant entry %q already holds a different login (%s): pass --name <entry name> to keep both", name, old.Issuer)
 	}
 	return nil

@@ -45,8 +45,8 @@ type App struct {
 	StdinIsTTY  bool
 
 	OpenBrowser func(url string) error
-	// SpawnSync starts a detached background index refresh for a tenant entry ("" is the
-	// default entry).
+	// SpawnSync starts a detached background index refresh for a tenant entry. The entry is
+	// always named, "default" included, so the child never falls back to the active one.
 	SpawnSync func(tenant string) error
 	// Login runs the browser flow; the default is oidc.Login. Tests replace it.
 	Login func(ctx context.Context, o oidc.LoginOptions) (session.Session, config.Config, error)
@@ -63,6 +63,8 @@ type App struct {
 	Exe, RealExe string
 	// LookPath finds an executable on PATH; the default is exec.LookPath.
 	LookPath func(string) (string, error)
+
+	envNoted bool // the $KUBECONFIG note was printed
 }
 
 const usage = `usage: kubectl palette <command>
@@ -81,7 +83,7 @@ commands:
   current      show the cluster and mode for this terminal
   sync         rebuild the local cluster index: sync [--tenant <name>]
   logout       log out of one tenant or all: logout [--tenant <name>] [--all] [--keep-contexts]
-  token        exec-credential plugin used by the kubeconfigs: token [--tenant <name>]
+  token        exec-credential plugin used by the kubeconfigs: token [--tenant <name>] [--issuer-id <id>]
   shell-init   print the shell hook: shell-init zsh|bash
   completion   tab completion for kubectl: completion install [--dir <dir>]
   version      print the version
@@ -254,15 +256,27 @@ type execCredential struct {
 func (a *App) token(ctx context.Context, args []string) error {
 	fs := newFlags("token", a.Stderr)
 	tenant := fs.String("tenant", "", "tenant entry whose token to print (default: the default entry)")
+	issuerID := fs.String("issuer-id", "", "id of the Palette login the kubeconfig was made for")
 	if _, err := parseFlags(fs, args); err != nil {
 		return exitError(2)
 	}
-	if *tenant != "" && *tenant != config.DefaultEntry {
+	named := *tenant != "" && *tenant != config.DefaultEntry
+	if named {
 		if err := config.ValidEntryName(*tenant); err != nil {
 			return err
 		}
+		// No released version wrote a named-entry file without an issuer id.
+		if *issuerID == "" {
+			return issuerMismatchErr(*tenant)
+		}
 	}
 	a.Paths = a.Paths.ForTenant(*tenant)
+	if *issuerID != "" {
+		// A missing config falls through to the login hint below.
+		if cfg, err := a.Paths.Load(); err == nil && config.IssuerID(cfg.Issuer) != *issuerID {
+			return issuerMismatchErr(a.Paths.Entry())
+		}
+	}
 	tok, exp, err := a.sessionMgr().IDToken(ctx)
 	if err != nil {
 		if errors.Is(err, config.ErrNoConfig) || errors.Is(err, session.ErrNoSession) || errors.Is(err, session.ErrSessionGone) {
@@ -275,6 +289,20 @@ func (a *App) token(ctx context.Context, args []string) error {
 	c.Status.Token = tok
 	c.Status.ExpirationTimestamp = exp.UTC().Format(time.RFC3339)
 	return json.NewEncoder(a.Stdout).Encode(c)
+}
+
+// issuerMismatchErr is the refusal when a kubeconfig entry was made for another login.
+func issuerMismatchErr(entry string) error {
+	return fmt.Errorf("this kubeconfig entry was made for a different Palette login than tenant entry %q now holds: run: kubectl palette contexts prune (and kubectl palette use <cluster> --refresh in a terminal pinned with use)", entry)
+}
+
+// entryIssuerID is the issuer id of the selected entry, "" when it has no config.
+func (a *App) entryIssuerID() string {
+	cfg, err := a.Paths.Load()
+	if err != nil || cfg.Issuer == "" {
+		return ""
+	}
+	return config.IssuerID(cfg.Issuer)
 }
 
 // --- sync and index ---
@@ -337,11 +365,7 @@ func (a *App) loadOrBuildIndex(ctx context.Context) (idx *index.Index, built boo
 
 func (a *App) maybeBackgroundSync(idx *index.Index) {
 	if a.SpawnSync != nil && idx.Stale(a.now()) {
-		t := a.Paths.Entry()
-		if t == config.DefaultEntry {
-			t = ""
-		}
-		_ = a.SpawnSync(t)
+		_ = a.SpawnSync(a.Paths.Entry())
 	}
 }
 
@@ -542,7 +566,7 @@ func (a *App) fetchOIDC(ctx context.Context, cl *palette.Client, c index.Cluster
 	if perr == nil && !sameIssuer(o.Issuer, cfg.Issuer) {
 		return nil, fmt.Errorf("%s: %w (%s). Use the kubeconfig from Palette for it", c.Ref(), errOtherIssuer, issuerHost(o.Issuer))
 	}
-	raw, err = kubeconfig.Rewrite(raw, kubeconfig.RewriteOptions{Tenant: a.Paths.Entry(), Secrets: []string{cfg.ClientSecret, o.ClientSecret}})
+	raw, err = kubeconfig.Rewrite(raw, kubeconfig.RewriteOptions{Tenant: a.Paths.Entry(), IssuerID: config.IssuerID(cfg.Issuer), Secrets: []string{cfg.ClientSecret, o.ClientSecret}})
 	if err != nil {
 		return nil, fmt.Errorf("rewrite kubeconfig for %s: %w", c.Ref(), err)
 	}

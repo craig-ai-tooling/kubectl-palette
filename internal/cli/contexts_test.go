@@ -119,7 +119,7 @@ func TestUseRecordsContextOnce(t *testing.T) {
 		t.Fatalf("context not written: %+v", cfg)
 	}
 	u := cfg.AuthInfos[c.AuthInfo]
-	if u == nil || u.Exec == nil || u.Exec.Command != "kubectl-palette" || !reflect.DeepEqual(u.Exec.Args, []string{"token"}) {
+	if u == nil || u.Exec == nil || u.Exec.Command != "kubectl-palette" || !reflect.DeepEqual(u.Exec.Args, []string{"token", "--issuer-id", config.IssuerID("https://i")}) {
 		t.Fatalf("user: %+v", u)
 	}
 	if u.Token != "" || len(u.ClientCertificateData) > 0 || cfg.CurrentContext != "" {
@@ -402,7 +402,7 @@ func TestContextsAcrossTenants(t *testing.T) {
 			t.Fatalf("no user for %s", r.Context)
 		}
 	}
-	if !reflect.DeepEqual(pins["default"], []string{"token"}) || !reflect.DeepEqual(pins["acme"], []string{"token", "--tenant", "acme"}) {
+	if !reflect.DeepEqual(pins["default"], []string{"token", "--issuer-id", config.IssuerID("https://i")}) || !reflect.DeepEqual(pins["acme"], []string{"token", "--tenant", "acme", "--issuer-id", config.IssuerID("https://i/acme")}) {
 		t.Fatalf("exec args: %v", pins)
 	}
 	if h.records(t)[0].Context == h.records(t)[1].Context || h.records(t)[0].User == h.records(t)[1].User {

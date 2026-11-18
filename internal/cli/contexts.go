@@ -60,7 +60,7 @@ func (a *App) warnf(format string, args ...any) {
 
 // ctxEntry is the kubectx identity of a cluster in the selected tenant entry.
 func (a *App) ctxEntry(c index.Cluster) kubectx.Entry {
-	return kubectx.Entry{Tenant: a.Paths.Entry(), Project: c.Project, Cluster: c.Name, UID: c.UID}
+	return kubectx.Entry{Tenant: a.Paths.Entry(), Project: c.Project, Cluster: c.Name, UID: c.UID, IssuerID: a.entryIssuerID()}
 }
 
 // recordContext adds one cluster to the user's kubeconfig as a context. path is the
@@ -74,7 +74,7 @@ func (a *App) recordContext(c index.Cluster, path string, fetched bool) {
 	}
 	entry := a.Paths.Entry()
 	reg, file := a.Paths.ContextRegistry(), a.Paths.ContextFile()
-	_, had, err := kubectx.Lookup(reg, entry, c.UID)
+	_, had, err := kubectx.Lookup(file, reg, entry, c.UID)
 	if err == nil && had && !fetched {
 		return
 	}
@@ -90,7 +90,36 @@ func (a *App) recordContext(c index.Cluster, path string, fetched bool) {
 	}
 	if !had {
 		fmt.Fprintf(a.Stderr, "added context %s to %s\n", rec.Context, shortPath(file))
+		a.noteKubeconfigEnv()
 	}
+}
+
+// noteKubeconfigEnv prints one note when a context was added to a file the shell's
+// $KUBECONFIG does not list, because kubectl in that shell will not see it. A terminal
+// pinned with `use` points $KUBECONFIG at a plugin file and needs no note.
+func (a *App) noteKubeconfigEnv() {
+	kc := a.getenv("KUBECONFIG")
+	if a.envNoted || kc == "" {
+		return
+	}
+	file := a.Paths.ContextFile()
+	kube := a.Paths.Root().KubeDir
+	for _, p := range filepath.SplitList(kc) {
+		if p == "" {
+			continue
+		}
+		if ap, err := filepath.Abs(p); err == nil {
+			p = ap
+		}
+		if af, err := filepath.Abs(file); err == nil && p == af {
+			return
+		}
+		if rel, err := filepath.Rel(kube, p); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return
+		}
+	}
+	a.envNoted = true
+	fmt.Fprintf(a.Stderr, "note: $KUBECONFIG is set, so kubectl in this shell reads it and will not see contexts in %s; add that file to $KUBECONFIG or unset it\n", shortPath(file))
 }
 
 // clusterFile is the outcome of getting one cluster's OIDC kubeconfig.
@@ -205,7 +234,7 @@ func (a *App) recordContexts(files []clusterFile) (ctxOutcome, error) {
 	var out ctxOutcome
 	reg, file := a.Paths.ContextRegistry(), a.Paths.ContextFile()
 	entry := a.Paths.Entry()
-	prior, err := kubectx.List(reg)
+	prior, err := kubectx.ListFor(file, reg)
 	if err != nil {
 		return out, err
 	}
@@ -294,17 +323,31 @@ func (a *App) autoContexts(ctx context.Context, idx *index.Index, skip bool) {
 		return
 	}
 	fmt.Fprintln(a.Stderr, out.summary(a.Paths.ContextFile()))
+	if out.Added > 0 {
+		a.noteKubeconfigEnv()
+	}
 	for _, f := range out.Failed {
 		fmt.Fprintf(a.Stderr, "  %s\n", f)
 	}
 }
 
 // removeContexts drops the records match accepts, with their kubeconfig entries.
-func (a *App) removeContexts(match func(kubectx.Record) bool) ([]kubectx.Record, error) {
+func (a *App) removeContexts(match func(kubectx.Record) bool) ([]kubectx.Removal, error) {
 	if !a.contextsEnabled() {
 		return nil, nil
 	}
-	return kubectx.Remove(a.Paths.ContextFile(), a.Paths.ContextRegistry(), match)
+	return kubectx.RemoveDetailed(a.Paths.ContextFile(), a.Paths.ContextRegistry(), match)
+}
+
+// deletedCount is how many removals deleted kubeconfig entries.
+func deletedCount(rs []kubectx.Removal) int {
+	n := 0
+	for _, r := range rs {
+		if r.EntriesDeleted {
+			n++
+		}
+	}
+	return n
 }
 
 // removeEntryContexts removes every context of one tenant entry. A failure is a warning.
@@ -313,7 +356,7 @@ func (a *App) removeEntryContexts(entry string) int {
 	if err != nil {
 		a.warnf("could not remove the contexts of %s from %s: %v\n  later: kubectl palette contexts remove --all --all-tenants", entry, shortPath(a.Paths.ContextFile()), err)
 	}
-	return len(recs)
+	return deletedCount(recs)
 }
 
 // --- the contexts command ---
@@ -359,9 +402,14 @@ func (a *App) contextsList(args []string) error {
 		fmt.Fprintln(a.Stderr, "no contexts yet: they are added at login and as you use clusters")
 		return nil
 	}
+	cur, _ := filepath.Abs(a.Paths.ContextFile())
 	tw := tabwriter.NewWriter(a.Stdout, 0, 4, 2, ' ', 0)
 	for _, r := range recs {
-		fmt.Fprintf(tw, "%s\t%s\t%s/%s\n", r.Context, r.Tenant, r.Project, r.Cluster)
+		line := fmt.Sprintf("%s\t%s\t%s/%s", r.Context, r.Tenant, r.Project, r.Cluster)
+		if r.File != "" && r.File != cur {
+			line += "\t" + shortPath(r.File)
+		}
+		fmt.Fprintln(tw, line)
 	}
 	return tw.Flush()
 }
@@ -418,6 +466,9 @@ func (a *App) contextsAdd(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Fprintln(a.Stderr, a.entryPrefix()+out.summary(a.Paths.ContextFile()))
+	if out.Added > 0 {
+		a.noteKubeconfigEnv()
+	}
 	for _, f := range out.Failed {
 		fmt.Fprintf(a.Stderr, "  failed: %s\n", f)
 	}
@@ -448,13 +499,13 @@ func (a *App) contextsRemove(args []string) error {
 	case *all && *allTenants:
 		match = func(kubectx.Record) bool { return true }
 	case *all:
-		entry, err := a.pickEntry(*tenant)
+		entry, err := a.entryOrOrphan(*tenant)
 		if err != nil {
 			return err
 		}
 		match = func(r kubectx.Record) bool { return r.Tenant == entry }
 	default:
-		recs, err := kubectx.List(a.Paths.ContextRegistry())
+		recs, err := kubectx.ListFor(a.Paths.ContextFile(), a.Paths.ContextRegistry())
 		if err != nil {
 			return err
 		}
@@ -483,17 +534,50 @@ func (a *App) contextsRemove(args []string) error {
 	return nil
 }
 
-func (a *App) printRemoved(recs []kubectx.Record) {
-	names := make([]string, len(recs))
-	for i, r := range recs {
-		names[i] = r.Context
+// entryOrOrphan resolves a --tenant value for a removal. A name with no saved entry is
+// accepted when the registry still holds contexts for it, so they can be cleaned up.
+func (a *App) entryOrOrphan(flagVal string) (string, error) {
+	entries := a.Paths.Root().Entries()
+	if flagVal == "" {
+		return a.pickEntry("")
+	}
+	if m, ok := config.MatchEntry(entries, flagVal); ok {
+		return m, nil
+	}
+	lower := strings.ToLower(flagVal)
+	recs, err := kubectx.ListFor(a.Paths.ContextFile(), a.Paths.ContextRegistry())
+	if err != nil {
+		return "", err
+	}
+	for _, r := range recs {
+		if r.Tenant == lower {
+			return lower, nil
+		}
+	}
+	return "", unknownEntryErr(flagVal, entries)
+}
+
+func (a *App) printRemoved(rs []kubectx.Removal) {
+	var names, left []string
+	for _, r := range rs {
+		if r.EntriesDeleted {
+			names = append(names, r.Record.Context)
+		} else {
+			left = append(left, r.Record.Context)
+		}
 	}
 	sort.Strings(names)
-	line := "removed " + plural(len(recs), "context", "contexts") + " from " + shortPath(a.Paths.ContextFile())
-	if len(names) > 0 && len(names) <= 10 {
-		line += ": " + strings.Join(names, ", ")
+	sort.Strings(left)
+	if len(names) > 0 || len(left) == 0 {
+		line := "removed " + plural(len(names), "context", "contexts") + " from " + shortPath(a.Paths.ContextFile())
+		if len(names) > 0 && len(names) <= 10 {
+			line += ": " + strings.Join(names, ", ")
+		}
+		fmt.Fprintln(a.Stderr, line)
 	}
-	fmt.Fprintln(a.Stderr, line)
+	for _, n := range left {
+		fmt.Fprintf(a.Stderr, "left %s in place (you changed it), no longer tracked\n", n)
+	}
 }
 
 func (a *App) contextsPrune(ctx context.Context, args []string) error {
@@ -506,20 +590,49 @@ func (a *App) contextsPrune(ctx context.Context, args []string) error {
 	if len(pos) > 0 {
 		return errors.New(contextsUsage)
 	}
-	if err := a.selectTenant(*tenant); err != nil {
-		return err
+	root := a.Paths.Root()
+	entries := root.Entries()
+	// Contexts of a tenant entry that is gone, or of a login the entry no longer holds, are
+	// always stale. Only the selected entry's clusters are checked against a fresh index.
+	ids := map[string]string{}
+	for _, e := range entries {
+		if c, err := root.ForTenant(e).Load(); err == nil && c.Issuer != "" {
+			ids[e] = config.IssuerID(c.Issuer)
+		}
 	}
-	idx, err := a.buildIndex(ctx)
-	if err != nil {
-		return err
-	}
-	entry := a.Paths.Entry()
+	entry, indexed := "", false
 	live := map[string]bool{}
-	for _, c := range idx.Clusters {
-		live[c.UID] = true
+	if *tenant != "" {
+		if _, ok := config.MatchEntry(entries, *tenant); !ok {
+			// No saved entry of that name: only the orphan cleanup applies.
+			if _, err := a.entryOrOrphan(*tenant); err != nil {
+				return err
+			}
+		}
 	}
-	removed, err := kubectx.Prune(a.Paths.ContextFile(), a.Paths.ContextRegistry(), func(r kubectx.Record) bool {
-		return r.Tenant != entry || live[r.UID]
+	if *tenant != "" || len(entries) > 0 {
+		if _, ok := config.MatchEntry(entries, *tenant); ok || *tenant == "" {
+			if err := a.selectTenant(*tenant); err != nil {
+				return err
+			}
+			idx, err := a.buildIndex(ctx)
+			if err != nil {
+				return err
+			}
+			entry, indexed = a.Paths.Entry(), true
+			for _, c := range idx.Clusters {
+				live[c.UID] = true
+			}
+		}
+	}
+	removed, err := kubectx.PruneDetailed(a.Paths.ContextFile(), a.Paths.ContextRegistry(), func(r kubectx.Record) bool {
+		if !contains(entries, r.Tenant) {
+			return false
+		}
+		if id, ok := ids[r.Tenant]; ok && r.IssuerID != id && !(r.IssuerID == "" && r.Tenant == config.DefaultEntry) {
+			return false
+		}
+		return !indexed || r.Tenant != entry || live[r.UID]
 	})
 	if err != nil {
 		return err

@@ -183,10 +183,11 @@ func TestTokenNeverUsesActiveEntryOrEnv(t *testing.T) {
 	if got := tokenOf(); got != defSess.IDToken {
 		t.Fatal("token with no flag used a tenant other than default")
 	}
-	if got := tokenOf("--tenant", "acme"); got != acmeSess.IDToken {
+	acmeID := config.IssuerID("https://i/acme")
+	if got := tokenOf("--tenant", "acme", "--issuer-id", acmeID); got != acmeSess.IDToken {
 		t.Fatal("token --tenant acme did not use acme")
 	}
-	if got := tokenOf("--tenant=default"); got != defSess.IDToken {
+	if got := tokenOf("--tenant=default", "--issuer-id", config.IssuerID("https://i")); got != defSess.IDToken {
 		t.Fatal("token --tenant default did not use default")
 	}
 }
@@ -197,10 +198,11 @@ func TestTokenErrorsNameTheFix(t *testing.T) {
 	if err := os.Remove(h.a.Paths.ForTenant("acme").SessionFile()); err != nil {
 		t.Fatal(err)
 	}
-	if code, _, e := h.run("token", "--tenant", "acme"); code == 0 || !strings.Contains(e, "run: kubectl palette login --tenant acme") {
+	acmeID := config.IssuerID("https://i/acme")
+	if code, _, e := h.run("token", "--tenant", "acme", "--issuer-id", acmeID); code == 0 || !strings.Contains(e, "run: kubectl palette login --tenant acme") {
 		t.Fatalf("%d %s", code, e)
 	}
-	if code, _, e := h.run("token", "--tenant", "ghost"); code == 0 || !strings.Contains(e, "run: kubectl palette login --tenant ghost") {
+	if code, _, e := h.run("token", "--tenant", "ghost", "--issuer-id", acmeID); code == 0 || !strings.Contains(e, "run: kubectl palette login --tenant ghost") {
 		t.Fatalf("%d %s", code, e)
 	}
 	if code, _, e := h.run("token", "--tenant", "../evil"); code == 0 || !strings.Contains(e, "invalid tenant entry name") {
@@ -209,7 +211,8 @@ func TestTokenErrorsNameTheFix(t *testing.T) {
 	if err := os.Remove(h.a.Paths.SessionFile()); err != nil {
 		t.Fatal(err)
 	}
-	if code, _, e := h.run("token"); code == 0 || !strings.Contains(e, "run: kubectl palette login") || strings.Contains(e, "--tenant") {
+	// Another entry exists, so a plain login would go to the active one: name the default.
+	if code, _, e := h.run("token"); code == 0 || !strings.Contains(e, "run: kubectl palette login --tenant default") {
 		t.Fatalf("%d %s", code, e)
 	}
 }
@@ -541,7 +544,7 @@ func TestBackgroundSyncCarriesTheTenant(t *testing.T) {
 	h.a.Now = func() time.Time { return time.Now().Add(time.Hour) }
 	h.run("use", "alpha", "--tenant", "acme", "--print-env")
 	h.run("use", "alpha", "--print-env")
-	if strings.Join(got, "|") != "acme|" {
+	if strings.Join(got, "|") != "acme|default" {
 		t.Fatalf("spawn tenants %q", got)
 	}
 }

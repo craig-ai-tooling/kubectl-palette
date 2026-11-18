@@ -37,8 +37,13 @@ func contains(list []string, s string) bool {
 
 // loginHint is the command that fixes a missing or expired session for the selected entry.
 func (a *App) loginHint() string {
-	if e := a.Paths.Entry(); e != config.DefaultEntry {
+	e := a.Paths.Entry()
+	if e != config.DefaultEntry {
 		return "kubectl palette login --tenant " + e
+	}
+	// A plain login goes to the active entry, which may be another one.
+	if len(a.Paths.Root().Entries()) > 1 {
+		return "kubectl palette login --tenant default"
 	}
 	return "kubectl palette login"
 }
@@ -67,16 +72,18 @@ func (a *App) pickEntry(flagVal string) (string, error) {
 	root := a.Paths.Root()
 	entries := root.Entries()
 	if flagVal != "" {
-		if !contains(entries, flagVal) {
+		m, ok := config.MatchEntry(entries, flagVal)
+		if !ok {
 			return "", unknownEntryErr(flagVal, entries)
 		}
-		return flagVal, nil
+		return m, nil
 	}
 	if env := a.getenv(config.EnvTenant); env != "" {
-		if !contains(entries, env) {
+		m, ok := config.MatchEntry(entries, env)
+		if !ok {
 			return "", fmt.Errorf("%s: %w", config.EnvTenant, unknownEntryErr(env, entries))
 		}
-		return env, nil
+		return m, nil
 	}
 	if act := root.Active(); act != "" && contains(entries, act) {
 		return act, nil
@@ -229,9 +236,13 @@ func (a *App) tenants(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("list organizations with tenant %s: %w", active, err)
 	}
+	// An entry hides an org only when it is on the same server: the same org name can exist
+	// on another Palette installation.
 	have := map[string]bool{}
 	for _, r := range rows {
-		have[r.name], have[r.cfg.Org] = true, true
+		if serverHost(r.cfg) == serverHost(cfg) {
+			have[r.name], have[r.cfg.Org] = true, true
+		}
 	}
 	server := cfg.Server
 	if server == "" {
@@ -275,13 +286,15 @@ func (a *App) tenantCmd(args []string) error {
 		fmt.Fprintln(a.Stdout, name)
 		return nil
 	}
-	if entries := root.Entries(); !contains(entries, pos[0]) {
+	entries := root.Entries()
+	name, ok := config.MatchEntry(entries, pos[0])
+	if !ok {
 		return unknownEntryErr(pos[0], entries)
 	}
-	if err := root.SetActive(pos[0]); err != nil {
+	if err := root.SetActive(name); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Stderr, "active tenant: %s\n", pos[0])
+	fmt.Fprintf(a.Stderr, "active tenant: %s\n", name)
 	return nil
 }
 
@@ -302,10 +315,6 @@ func (a *App) logout(args []string) error {
 			return errors.New("use either --tenant or --all")
 		}
 		names = root.Entries()
-		if len(names) == 0 {
-			fmt.Fprintln(a.Stderr, "nothing to log out of")
-			return nil
-		}
 	} else {
 		n, err := a.pickEntry(*tenant)
 		if err != nil {
@@ -323,13 +332,22 @@ func (a *App) logout(args []string) error {
 		}
 	}
 	if *all && !*keep {
-		// Records of an entry that no longer exists go too.
+		// Records of an entry that no longer exists go too, also when no entry is saved.
 		a.Paths = root
 		rest, err := a.removeContexts(func(kubectx.Record) bool { return true })
 		if err != nil {
 			a.warnf("could not remove contexts: %v", err)
 		}
-		removed += len(rest)
+		removed += deletedCount(rest)
+		for _, r := range rest {
+			if !r.EntriesDeleted {
+				fmt.Fprintf(a.Stderr, "left %s in place (you changed it), no longer tracked\n", r.Record.Context)
+			}
+		}
+		if len(names) == 0 && len(rest) == 0 {
+			fmt.Fprintln(a.Stderr, "nothing to log out of")
+			return nil
+		}
 	}
 	a.Paths = root
 	if removed > 0 {

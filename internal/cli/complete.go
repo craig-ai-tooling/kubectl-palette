@@ -59,7 +59,7 @@ func (a *App) complete(words []string) {
 	}
 	var ctxNames []string
 	if len(words) > 2 && words[0] == "contexts" && words[1] == "remove" && a.Paths.ContextFile() != "" {
-		if recs, err := kubectx.List(a.Paths.ContextRegistry()); err == nil {
+		if recs, err := kubectx.ListFor(a.Paths.ContextFile(), a.Paths.ContextRegistry()); err == nil {
 			for _, r := range recs {
 				ctxNames = append(ctxNames, r.Context)
 			}
