@@ -34,7 +34,7 @@ func TestComplete(t *testing.T) {
 		{"flag before name", []string{"exec", "--admin", "so"}, []string{"solo"}},
 		{"second positional is not a cluster", []string{"use", "solo", ""}, nil},
 		{"after double dash is kubectl's", []string{"exec", "solo", "--", "ge"}, nil},
-		{"use flags", []string{"use", "--"}, []string{"--admin", "--no-fuzzy"}},
+		{"use flags", []string{"use", "--"}, []string{"--admin", "--no-fuzzy", "--refresh"}},
 		{"exec flags", []string{"exec", "--a"}, []string{"--admin"}},
 		{"completion", []string{"completion", ""}, []string{"install"}},
 		{"completion flag", []string{"completion", "install", "--"}, []string{"--dir"}},
@@ -60,5 +60,17 @@ func TestComplete(t *testing.T) {
 func TestNilIndex(t *testing.T) {
 	if got := Complete(nil, []string{"use", ""}); got != nil {
 		t.Fatal(got)
+	}
+}
+
+func TestNoPluginFlagsAfterDoubleDash(t *testing.T) {
+	for _, words := range [][]string{
+		{"exec", "solo", "--", "--a"},
+		{"exec", "solo", "--", "-"},
+		{"use", "--", "--a"},
+	} {
+		if got := Complete(sample(), words); got != nil {
+			t.Errorf("Complete(%v) = %v, want nothing", words, got)
+		}
 	}
 }

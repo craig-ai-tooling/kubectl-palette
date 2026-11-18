@@ -18,8 +18,8 @@ var Commands = []string{"login", "use", "exec", "current", "sync", "logout", "to
 
 // flags lists the flags completed after a command name.
 var flags = map[string][]string{
-	"use":   {"--admin", "--no-fuzzy"},
-	"exec":  {"--admin"},
+	"use":   {"--admin", "--no-fuzzy", "--refresh"},
+	"exec":  {"--admin", "--refresh"},
 	"login": {"--from-kubeconfig", "--issuer", "--client-id", "--client-secret", "--api-url", "--no-browser"},
 }
 
@@ -37,6 +37,11 @@ func Complete(idx *index.Index, words []string) []string {
 	cmd, prior := words[0], words[1:len(words)-1]
 	switch cmd {
 	case "use", "exec":
+		for _, w := range prior {
+			if w == "--" {
+				return nil // everything after the boundary belongs to kubectl
+			}
+		}
 		if strings.HasPrefix(cur, "-") {
 			return filter(flags[cmd], cur)
 		}
