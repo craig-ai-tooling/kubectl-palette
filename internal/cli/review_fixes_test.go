@@ -268,7 +268,8 @@ func TestLoginIssuerChangeDoesNotKeepOldAPIAndWipesState(t *testing.T) {
 	}
 
 	// With an explicit --api-url the switch goes through and the old state is gone.
-	code, _, e = h.run("login", "--issuer", newIss.URL, "--api-url", h.f.srv.URL, "--import-kubelogin-cache", kubeloginCache(t))
+	// --no-contexts: a login would otherwise fetch the cluster files again.
+	code, _, e = h.run("login", "--no-contexts", "--issuer", newIss.URL, "--api-url", h.f.srv.URL, "--import-kubelogin-cache", kubeloginCache(t))
 	if code != 0 {
 		t.Fatalf("%s", e)
 	}

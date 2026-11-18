@@ -123,7 +123,7 @@ func TestPickEntryPrecedence(t *testing.T) {
 			dir := t.TempDir()
 			h := &harness{env: map[string]string{}}
 			h.a = &App{Getenv: func(k string) string { return h.env[k] },
-				Paths: config.Paths{Home: filepath.Join(dir, "home"), KubeDir: filepath.Join(dir, "kube")}}
+				Paths: testPaths(dir)}
 			for _, e := range tc.entries {
 				if err := h.a.Paths.ForTenant(e).Save(config.Config{Issuer: "i", ClientID: "c", APIURL: "a"}); err != nil {
 					t.Fatal(err)
@@ -427,7 +427,7 @@ func TestLoginEnvServer(t *testing.T) {
 	h := &harness{out: &bytes.Buffer{}, errb: &bytes.Buffer{}, env: map[string]string{config.EnvServer: srv.URL}}
 	h.a = &App{Stdout: h.out, Stderr: h.errb, Stdin: strings.NewReader(""), Login: login,
 		Getenv: func(k string) string { return h.env[k] },
-		Paths:  config.Paths{Home: filepath.Join(dir, "home"), KubeDir: filepath.Join(dir, "kube")}}
+		Paths:  testPaths(dir)}
 	if code, _, e := h.run("login", "--no-browser"); code != 0 {
 		t.Fatalf("%d %s", code, e)
 	}

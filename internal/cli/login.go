@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/craig-ai-tooling/kubectl-palette/internal/config"
@@ -21,7 +22,7 @@ type loginFlags struct {
 	fromKC, issuer, clientID, clientSecret, apiURL string
 	importDir, bootstrap                           string
 	server, tenant, name, caFile                   string
-	noBrowser                                      bool
+	noBrowser, noContexts                          bool
 }
 
 // legacy reports whether the flags are the original bootstrap form. That form configures
@@ -39,6 +40,7 @@ func (a *App) login(ctx context.Context, args []string) error {
 	fs.StringVar(&f.clientSecret, "client-secret", "", "OIDC client secret (optional)")
 	fs.StringVar(&f.apiURL, "api-url", "", "Palette API URL (default: the issuer's scheme and host)")
 	fs.BoolVar(&f.noBrowser, "no-browser", false, "print the login URL without opening a browser")
+	fs.BoolVar(&f.noContexts, "no-contexts", false, "do not add the tenant's clusters as contexts in your kubeconfig")
 	fs.StringVar(&f.importDir, "import-kubelogin-cache", "", "")
 	fs.StringVar(&f.bootstrap, "bootstrap-json", "", "")
 	fs.StringVar(&f.server, "server", "", "Palette server URL, for example https://palette.example.com ($"+config.EnvServer+")")
@@ -188,25 +190,36 @@ func (a *App) loginSaved(ctx context.Context, root config.Paths, f loginFlags) e
 		if err := a.wipeState(m); err != nil {
 			return fmt.Errorf("issuer changed from %s to %s and the old state could not be removed, nothing was saved: %w", oldIssuer, cfg.Issuer, err)
 		}
-		fmt.Fprintf(a.Stderr, "issuer changed: removed the old session, index and cached kubeconfigs\n")
+		n := a.removeEntryContexts(a.Paths.Entry())
+		fmt.Fprintf(a.Stderr, "issuer changed: removed the old session, index, cached kubeconfigs and %s\n", plural(n, "context", "contexts"))
 	}
-	return a.finishLogin(ctx, root, cfg, sess)
+	return a.finishLogin(ctx, root, cfg, sess, f.noContexts)
 }
 
+// sshHint is printed on a machine with no browser. 8000 is the first default login port.
+const sshHint = "No browser here? From your own machine, forward the login port, then open the URL there: ssh -L 8000:localhost:8000 <this host> (use the port shown in the URL's redirect_uri)."
+
 func (a *App) browserLogin(ctx context.Context, cfg config.Config, hc *http.Client, noBrowser bool) (session.Session, config.Config, error) {
-	var open func(string) error
-	if !noBrowser {
-		open = a.OpenBrowser
+	headless := noBrowser || oidc.Headless(runtime.GOOS, a.getenv)
+	o := oidc.LoginOptions{Cfg: cfg, HTTP: hc, Ports: a.LoginPorts, Out: a.Stderr}
+	if !headless {
+		o.OpenBrowser = a.OpenBrowser
+	} else {
+		o.Hint = sshHint
+	}
+	// Paste-back works wherever there is a terminal, also next to an opened browser.
+	if a.StdinIsTTY && a.Stdin != nil {
+		o.In = a.Stdin
 	}
 	login := a.Login
 	if login == nil {
 		login = oidc.Login
 	}
-	return login(ctx, oidc.LoginOptions{Cfg: cfg, HTTP: hc, Ports: a.LoginPorts, Out: a.Stderr, OpenBrowser: open})
+	return login(ctx, o)
 }
 
 // finishLogin saves the entry a.Paths points at, makes it active and builds its index.
-func (a *App) finishLogin(ctx context.Context, root config.Paths, cfg config.Config, sess session.Session) error {
+func (a *App) finishLogin(ctx context.Context, root config.Paths, cfg config.Config, sess session.Session, noContexts bool) error {
 	if err := a.Paths.Save(cfg); err != nil {
 		return err
 	}
@@ -223,11 +236,16 @@ func (a *App) finishLogin(ctx context.Context, root config.Paths, cfg config.Con
 	}
 	fmt.Fprintf(a.Stderr, "logged in; indexed %d clusters in %.1fs\n", len(idx.Clusters), a.now().Sub(start).Seconds())
 	fmt.Fprintf(a.Stderr, "active tenant: %s\n", a.Paths.Entry())
+	a.autoContexts(ctx, idx, noContexts)
 	if len(idx.Clusters) == 1 {
 		c := idx.Clusters[0]
-		if _, _, err := a.ensureKubeconfig(ctx, c, false, false); err != nil {
+		path, fetched, err := a.ensureKubeconfig(ctx, c, false, false)
+		if err != nil {
 			fmt.Fprintf(a.Stderr, "one cluster found (%s) but its kubeconfig could not be prepared: %v\n", c.Ref(), err)
 			return nil
+		}
+		if !noContexts {
+			a.recordContext(c, path, fetched)
 		}
 		fmt.Fprintf(a.Stderr, "one cluster found and selected: %s. Run: kubectl palette use\n", c.Ref())
 	}
@@ -277,7 +295,7 @@ func (a *App) loginServer(ctx context.Context, root config.Paths, f loginFlags) 
 		}
 	}
 	a.Paths = root.ForTenant(name)
-	return a.finishLogin(ctx, root, cfg, sess)
+	return a.finishLogin(ctx, root, cfg, sess, f.noContexts)
 }
 
 // checkEntry validates an entry name and refuses to reuse one that holds another issuer.

@@ -69,14 +69,18 @@ const usage = `usage: kubectl palette <command>
 
 commands:
   login        log in through the browser: login --server <url> [--tenant <org>] [--name <entry>] [--ca-file <pem>]
-               (again later: login [--tenant <entry>]; older form: --from-kubeconfig <file>)
+               [--no-browser] [--no-contexts] (again later: login [--tenant <entry>];
+               older form: --from-kubeconfig <file>)
   tenants      list the logged-in tenants: tenants [--available]
   tenant       show or set the active tenant: tenant [name]
-  use          target a cluster in this terminal: use [name] [--admin] [--no-fuzzy] [--refresh] [--tenant <name>]
-  exec         run kubectl against a cluster once: exec <name> [--admin] [--refresh] [--tenant <name>] -- <args>
+  use          target a cluster in this terminal: use [name] [--admin] [--host <cluster>] [--no-fuzzy] [--refresh]
+               [--no-context] [--tenant <name>]; use --unset goes back to your own kubeconfig
+  exec         run kubectl against a cluster once: exec <name> [--admin] [--refresh] [--no-context] [--tenant <name>] -- <args>
+  contexts     clusters as contexts in your kubeconfig, for kubectl --context and use-context in any terminal:
+               contexts [list] | add <name>... | --all [--host <cluster>] | remove <context>... | --all [--all-tenants] | prune
   current      show the cluster and mode for this terminal
   sync         rebuild the local cluster index: sync [--tenant <name>]
-  logout       log out of one tenant or all: logout [--tenant <name>] [--all]
+  logout       log out of one tenant or all: logout [--tenant <name>] [--all] [--keep-contexts]
   token        exec-credential plugin used by the kubeconfigs: token [--tenant <name>]
   shell-init   print the shell hook: shell-init zsh|bash
   completion   tab completion for kubectl: completion install [--dir <dir>]
@@ -84,6 +88,7 @@ commands:
 
 A tenant is chosen by --tenant, then $KUBECTL_PALETTE_TENANT, then the active tenant
 (kubectl palette tenant <name>). "token" without --tenant always means the default tenant.
+Contexts go in ~/.kube/config. Turn them off with KUBECTL_PALETTE_NO_CONTEXTS=1.
 `
 
 func (a *App) now() time.Time {
@@ -129,6 +134,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = a.use(ctx, rest)
 	case "exec":
 		return a.execCmd(ctx, rest)
+	case "contexts":
+		err = a.contextsCmd(ctx, rest)
 	case "current":
 		err = a.current()
 	case "logout":
@@ -338,15 +345,47 @@ func (a *App) maybeBackgroundSync(idx *index.Index) {
 	}
 }
 
-// resolve finds a cluster, doing one synchronous refresh and one retry on a miss.
-func (a *App) resolve(ctx context.Context, idx *index.Index, fresh bool, name string) (index.Cluster, *index.Index, bool, error) {
-	cl, err := idx.Resolve(name)
-	if errors.Is(err, index.ErrNotFound) && !fresh {
+// noVirtualError means --host named a cluster that hosts no virtual cluster.
+type noVirtualError struct{ host string }
+
+func (e noVirtualError) Error() string {
+	return fmt.Sprintf("no virtual clusters are hosted by %s", e.host)
+}
+
+// hostedIndex limits idx to the virtual clusters hosted by host.
+func hostedIndex(idx *index.Index, host string) (*index.Index, error) {
+	sub, err := idx.HostedBy(host)
+	if err != nil {
+		return nil, fmt.Errorf("--host %s: %w", host, err)
+	}
+	if len(sub.Clusters) == 0 {
+		return nil, noVirtualError{host}
+	}
+	return sub, nil
+}
+
+// resolve finds a cluster, doing one synchronous refresh and one retry on a miss. A host
+// limits the search to the virtual clusters that cluster hosts. The index it returns is
+// always the full one.
+func (a *App) resolve(ctx context.Context, idx *index.Index, fresh bool, name, host string) (index.Cluster, *index.Index, bool, error) {
+	find := func(i *index.Index) (index.Cluster, error) {
+		if host != "" {
+			sub, err := hostedIndex(i, host)
+			if err != nil {
+				return index.Cluster{}, err
+			}
+			i = sub
+		}
+		return i.Resolve(name)
+	}
+	cl, err := find(idx)
+	var nv noVirtualError
+	if (errors.Is(err, index.ErrNotFound) || errors.As(err, &nv)) && !fresh {
 		nidx, berr := a.buildIndex(ctx)
 		if berr != nil {
 			return cl, idx, false, fmt.Errorf("%w (refreshing the index failed: %v)", err, berr)
 		}
-		cl, err = nidx.Resolve(name)
+		cl, err = find(nidx)
 		return cl, nidx, true, err
 	}
 	return cl, idx, fresh, err
@@ -437,8 +476,8 @@ func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin, refr
 			return "", false, fmt.Errorf("fetch admin kubeconfig for %s: %w", c.Ref(), err)
 		}
 	} else {
-		raw, err = cl.KubeconfigClient(ctx, c.UID, c.ProjectUID)
-		if errors.Is(err, palette.ErrNotFound) {
+		raw, err = a.fetchOIDC(ctx, cl, c)
+		if errors.Is(err, errNoOIDC) {
 			a.recordOIDC(c.UID, true)
 			msg := fmt.Sprintf("%s has no OIDC configured, so there is no OIDC kubeconfig for it.", c.Ref())
 			if c.CanAdmin() {
@@ -447,19 +486,10 @@ func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin, refr
 			return "", false, errors.New(msg)
 		}
 		if err != nil {
-			return "", false, fmt.Errorf("fetch kubeconfig for %s: %w", c.Ref(), err)
+			return "", false, err
 		}
 		if c.NoOIDC {
 			a.recordOIDC(c.UID, false)
-		}
-		cfg, cerr := a.Paths.Load()
-		if cerr != nil {
-			return "", false, cerr
-		}
-		o, _ := kubeconfig.ParseOIDC(raw)
-		raw, err = kubeconfig.Rewrite(raw, kubeconfig.RewriteOptions{Tenant: a.Paths.Entry(), Secrets: []string{cfg.ClientSecret, o.ClientSecret}})
-		if err != nil {
-			return "", false, fmt.Errorf("rewrite kubeconfig for %s: %w", c.Ref(), err)
 		}
 	}
 	if err := config.WriteFileAtomic(path, raw); err != nil {
@@ -470,6 +500,31 @@ func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin, refr
 		return "", false, err
 	}
 	return path, true, nil
+}
+
+// errNoOIDC means Palette has no OIDC kubeconfig for the cluster.
+var errNoOIDC = errors.New("no OIDC configured")
+
+// fetchOIDC downloads a cluster's OIDC kubeconfig and rewrites it so it holds no secret.
+// It writes nothing and is safe to call from several goroutines.
+func (a *App) fetchOIDC(ctx context.Context, cl *palette.Client, c index.Cluster) ([]byte, error) {
+	raw, err := cl.KubeconfigClient(ctx, c.UID, c.ProjectUID)
+	if errors.Is(err, palette.ErrNotFound) {
+		return nil, errNoOIDC
+	}
+	if err != nil {
+		return nil, fmt.Errorf("fetch kubeconfig for %s: %w", c.Ref(), err)
+	}
+	cfg, err := a.Paths.Load()
+	if err != nil {
+		return nil, err
+	}
+	o, _ := kubeconfig.ParseOIDC(raw)
+	raw, err = kubeconfig.Rewrite(raw, kubeconfig.RewriteOptions{Tenant: a.Paths.Entry(), Secrets: []string{cfg.ClientSecret, o.ClientSecret}})
+	if err != nil {
+		return nil, fmt.Errorf("rewrite kubeconfig for %s: %w", c.Ref(), err)
+	}
+	return raw, nil
 }
 
 // recordOIDC remembers in the index whether a cluster has OIDC. A failed write is not
@@ -489,12 +544,21 @@ func (a *App) use(ctx context.Context, args []string) error {
 	noFuzzy := fs.Bool("no-fuzzy", false, "with no name, use a numbered list instead of the fuzzy finder")
 	refresh := fs.Bool("refresh", false, "fetch the kubeconfig again instead of using the cached file")
 	tenant := fs.String("tenant", "", "tenant entry to use")
+	host := fs.String("host", "", "only the virtual clusters hosted by this cluster")
+	noContext := fs.Bool("no-context", false, "do not add this cluster as a context in your kubeconfig")
+	unset := fs.Bool("unset", false, "stop using a Palette cluster in this terminal (unset KUBECONFIG)")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return exitError(2)
 	}
+	if *unset {
+		if len(pos) > 0 || *admin || *host != "" {
+			return errors.New("usage: kubectl palette use --unset")
+		}
+		return a.unsetKubeconfig(*printEnv)
+	}
 	if len(pos) > 1 {
-		return errors.New("usage: kubectl palette use [name] [--admin] [--refresh] [--tenant <name>]")
+		return errors.New("usage: kubectl palette use [name] [--admin] [--host <cluster>] [--refresh] [--tenant <name>]")
 	}
 	if err := a.selectTenant(*tenant); err != nil {
 		return err
@@ -505,12 +569,18 @@ func (a *App) use(ctx context.Context, args []string) error {
 	}
 	var c index.Cluster
 	if len(pos) == 1 {
-		c, idx, fresh, err = a.resolve(ctx, idx, fresh, pos[0])
+		c, idx, fresh, err = a.resolve(ctx, idx, fresh, pos[0], *host)
 		if err != nil {
 			return err
 		}
 	} else {
-		c, err = a.pick(idx, *noFuzzy)
+		scope := idx
+		if *host != "" {
+			if scope, err = hostedIndex(idx, *host); err != nil {
+				return err
+			}
+		}
+		c, err = a.pick(scope, *noFuzzy)
 		if err != nil {
 			return err
 		}
@@ -527,6 +597,9 @@ func (a *App) use(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stderr, "fetched kubeconfig for %s\n", c.Ref())
 	}
 	fmt.Fprintf(a.Stderr, "using %s%s (%s)\n", a.entryPrefix(), c.Ref(), mode)
+	if !*admin && !*noContext {
+		a.recordContext(c, path, fetched)
+	}
 	if !fresh {
 		a.maybeBackgroundSync(idx)
 	}
@@ -539,6 +612,18 @@ func (a *App) use(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintln(a.Stderr, "no shell hook installed, starting a subshell (exit to leave). See: kubectl palette shell-init")
 	return a.SpawnShell(path)
+}
+
+// unsetKubeconfig is `use --unset`. The shell hook evals what it prints, so this terminal
+// goes back to the user's own kubeconfig. Without the hook there is nothing to eval.
+func (a *App) unsetKubeconfig(flagPrint bool) error {
+	if a.shouldPrintEnv(flagPrint) {
+		fmt.Fprintln(a.Stdout, shell.UnsetKubeconfig)
+		fmt.Fprintln(a.Stderr, "this terminal uses your own kubeconfig again")
+		return nil
+	}
+	fmt.Fprintf(a.Stderr, "no shell hook installed, so this cannot change your shell. Run: %s\n(or install the hook: kubectl palette shell-init)\n", shell.UnsetKubeconfig)
+	return nil
 }
 
 // pick chooses a cluster without a name: the only cluster, the fuzzy finder on a TTY, or
@@ -584,10 +669,12 @@ func pickerItems(idx *index.Index) []picker.Item {
 			label += "  admin"
 			admin = "yes"
 		}
-		items[i] = picker.Item{
-			Label:  label,
-			Detail: fmt.Sprintf("project: %s\ncluster: %s\noidc: %s\nadmin kubeconfig: %s", c.Project, c.Name, oidc, admin),
+		detail := fmt.Sprintf("project: %s\ncluster: %s\noidc: %s\nadmin kubeconfig: %s", c.Project, c.Name, oidc, admin)
+		if c.Virtual() {
+			label += "  " + virtualWords(c)
+			detail += "\n" + virtualWords(c)
 		}
+		items[i] = picker.Item{Label: label, Detail: detail}
 	}
 	return items
 }
@@ -616,7 +703,18 @@ func statusWords(c index.Cluster) string {
 	if c.CanAdmin() {
 		s += "  admin"
 	}
+	if c.Virtual() {
+		s += "  " + virtualWords(c)
+	}
 	return s
+}
+
+// virtualWords marks a virtual cluster and names its host when the index knows it.
+func virtualWords(c index.Cluster) string {
+	if c.Host == "" {
+		return "virtual"
+	}
+	return "virtual on " + c.Host
 }
 
 // --- exec ---
@@ -637,12 +735,13 @@ func (a *App) execCmd(ctx context.Context, args []string) int {
 	admin := fs.Bool("admin", false, "use the admin kubeconfig")
 	refresh := fs.Bool("refresh", false, "fetch the kubeconfig again instead of using the cached file")
 	tenant := fs.String("tenant", "", "tenant entry to use")
+	noContext := fs.Bool("no-context", false, "do not add this cluster as a context in your kubeconfig")
 	pos, err := parseFlags(fs, before)
 	if err != nil {
 		return 2
 	}
 	if len(pos) != 1 || !split || len(kargs) == 0 {
-		fmt.Fprintln(a.Stderr, "usage: kubectl palette exec <name> [--admin] [--refresh] [--tenant <name>] -- <kubectl args>")
+		fmt.Fprintln(a.Stderr, "usage: kubectl palette exec <name> [--admin] [--refresh] [--no-context] [--tenant <name>] -- <kubectl args>")
 		return 2
 	}
 	run := func() (int, error) {
@@ -653,13 +752,16 @@ func (a *App) execCmd(ctx context.Context, args []string) int {
 		if err != nil {
 			return 0, err
 		}
-		c, idx, fresh, err := a.resolve(ctx, idx, fresh, pos[0])
+		c, idx, fresh, err := a.resolve(ctx, idx, fresh, pos[0], "")
 		if err != nil {
 			return 0, err
 		}
-		path, _, err := a.ensureKubeconfig(ctx, c, *admin, *refresh)
+		path, fetched, err := a.ensureKubeconfig(ctx, c, *admin, *refresh)
 		if err != nil {
 			return 0, err
+		}
+		if !*admin && !*noContext {
+			a.recordContext(c, path, fetched)
 		}
 		if !fresh {
 			a.maybeBackgroundSync(idx)

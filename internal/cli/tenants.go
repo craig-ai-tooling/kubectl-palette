@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/craig-ai-tooling/kubectl-palette/internal/config"
+	"github.com/craig-ai-tooling/kubectl-palette/internal/kubectx"
 	"github.com/craig-ai-tooling/kubectl-palette/internal/session"
 )
 
@@ -290,6 +291,7 @@ func (a *App) logout(args []string) error {
 	fs := newFlags("logout", a.Stderr)
 	tenant := fs.String("tenant", "", "tenant entry to log out of (default: the selected one)")
 	all := fs.Bool("all", false, "log out of every tenant")
+	keep := fs.Bool("keep-contexts", false, "leave the tenant's contexts in your kubeconfig")
 	if _, err := parseFlags(fs, args); err != nil {
 		return exitError(2)
 	}
@@ -312,10 +314,26 @@ func (a *App) logout(args []string) error {
 		names = []string{n}
 	}
 	failed := false
+	removed := 0
 	for _, n := range names {
-		if err := a.logoutEntry(root, n); err != nil {
+		c, err := a.logoutEntry(root, n, *keep)
+		removed += c
+		if err != nil {
 			failed = true
 		}
+	}
+	if *all && !*keep {
+		// Records of an entry that no longer exists go too.
+		a.Paths = root
+		rest, err := a.removeContexts(func(kubectx.Record) bool { return true })
+		if err != nil {
+			a.warnf("could not remove contexts: %v", err)
+		}
+		removed += len(rest)
+	}
+	a.Paths = root
+	if removed > 0 {
+		fmt.Fprintf(a.Stderr, "removed %s from %s\n", plural(removed, "context", "contexts"), shortPath(root.ContextFile()))
 	}
 	if failed {
 		return exitError(1)
@@ -326,9 +344,14 @@ func (a *App) logout(args []string) error {
 // logoutEntry logs out of one entry. The default entry keeps its config, so the next login
 // needs no flags, and loses its session, index and admin files. A named entry is deleted
 // whole, and the active marker goes if it pointed there.
-func (a *App) logoutEntry(root config.Paths, name string) error {
+func (a *App) logoutEntry(root config.Paths, name string, keepContexts bool) (contexts int, err error) {
 	a.Paths = root.ForTenant(name)
 	defer func() { a.Paths = root }()
+	// A session that merely expires leaves contexts in place. A logout removes them, unless
+	// asked not to. A failure here is a warning: it must not block the logout.
+	if !keepContexts {
+		contexts = a.removeEntryContexts(name)
+	}
 	var errs []error
 	if err := a.sessionMgr().Delete(); err != nil {
 		errs = append(errs, err)
@@ -354,14 +377,14 @@ func (a *App) logoutEntry(root config.Paths, name string) error {
 		for _, e := range errs {
 			fmt.Fprintf(a.Stderr, "  %v\n", e)
 		}
-		return errors.Join(errs...)
+		return contexts, errors.Join(errs...)
 	}
 	if name == config.DefaultEntry {
 		fmt.Fprintf(a.Stderr, "logged out; removed the session, the index and %d admin kubeconfig(s)\n", removed)
 	} else {
 		fmt.Fprintf(a.Stderr, "logged out of %s; removed its session, index and cluster kubeconfigs\n", name)
 	}
-	return nil
+	return contexts, nil
 }
 
 // absPath makes a user-supplied path absolute for storing in a config file.

@@ -50,11 +50,14 @@ type fakePalette struct {
 	hits      map[string]int
 	clusters  string // JSON items for metadata
 	noOIDC    map[string]bool
+	fail      map[string]bool // cluster uid -> kubeconfig download answers 500
+	delay     time.Duration   // held by every kubeconfig download, to overlap them
+	cur, max  int             // kubeconfig downloads in flight now and at most
 	tokenBody string
 }
 
 func newFakePalette(t *testing.T) *fakePalette {
-	f := &fakePalette{hits: map[string]int{}, noOIDC: map[string]bool{}}
+	f := &fakePalette{hits: map[string]int{}, noOIDC: map[string]bool{}, fail: map[string]bool{}}
 	f.clusters = `[
 	 {"name":"alpha","uid":"ua","annotations":{"projectUid":"p1","permissions":"cluster.get,cluster.adminKubeconfigDownload"}},
 	 {"name":"beta","uid":"ub","annotations":{"projectUid":"p1","permissions":"cluster.get"}},
@@ -83,6 +86,16 @@ func newFakePalette(t *testing.T) *fakePalette {
 		case strings.HasSuffix(r.URL.Path, "/assets/kubeconfigclient"):
 			if f.noOIDC[strings.Split(r.URL.Path, "/")[3]] {
 				http.NotFound(w, r)
+				return
+			}
+			f.mu.Lock()
+			f.cur++
+			f.max = max(f.max, f.cur)
+			f.mu.Unlock()
+			defer func() { f.mu.Lock(); f.cur--; f.mu.Unlock() }()
+			time.Sleep(f.delay)
+			if f.fail[strings.Split(r.URL.Path, "/")[3]] {
+				w.WriteHeader(500)
 				return
 			}
 			if r.Header.Get("ProjectUid") == "" {
@@ -136,7 +149,7 @@ func newHarness(t *testing.T, idExp time.Time) *harness {
 	h.a = &App{
 		Version: "test", Stdout: h.out, Stderr: h.errb, Stdin: strings.NewReader(""),
 		Getenv:    func(k string) string { return h.env[k] },
-		Paths:     config.Paths{Home: filepath.Join(dir, "home"), KubeDir: filepath.Join(dir, "kube")},
+		Paths:     testPaths(dir),
 		SpawnSync: func(string) error { h.spawns++; return nil },
 		RunKubectl: func(env, args []string) int {
 			h.kenv, h.kargs = append(h.kenv, env), append(h.kargs, args)
