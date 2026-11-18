@@ -7,9 +7,7 @@ Do **not** open a public issue for a security problem.
 Use GitHub private vulnerability reporting:
 **Security → Advisories → Report a vulnerability** (free on public repos).
 
-<FILL IN: contact email, if you want a second channel.>
-
-Expect an acknowledgement within `<FILL IN: e.g. 3 business days>`.
+Expect an acknowledgement within 3 business days.
 
 ## What is enabled on this repository
 
@@ -27,4 +25,4 @@ Expect an acknowledgement within `<FILL IN: e.g. 3 business days>`.
 Never commit a secret. If one is committed, assume it is public permanently:
 rotate it immediately, then remove it from history.
 
-Application-level security rules live in [`docs/security.md`](docs/security.md).
+Credential and file-handling rules live in [`docs/security.md`](docs/security.md).

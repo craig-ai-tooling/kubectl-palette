@@ -18,8 +18,8 @@ You have no memory of previous iterations. Everything you need is on disk.
    One. Not two. Not "this one is small so I'll also do the next one."
    Resist that urge — it is how loops go off the rails.
 
-5. **Implement it.** Follow the conventions in `AGENTS.md`. Reuse what
-   `docs/components.md` already defines. Do not invent requirements: if the task
+5. **Implement it.** Follow the conventions in `AGENTS.md` and the design in
+   `docs/design.md`. Do not invent requirements: if the task
    is ambiguous, do NOT guess — write the ambiguity into `PROGRESS.md` under
    `NEEDS CLARIFICATION`, mark the task blocked, and move to the next one.
 

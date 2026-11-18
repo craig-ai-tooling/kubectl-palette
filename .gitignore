@@ -33,3 +33,7 @@ Thumbs.db
 
 # Claude Code local overrides (machine-specific, not shared)
 .claude/settings.local.json
+
+# Go build output
+/kubectl-palette
+/dist/

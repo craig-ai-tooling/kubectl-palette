@@ -22,8 +22,8 @@
 - [ ] Read the relevant `docs/` file for this change
 - [ ] No secret added
 - [ ] No hook disabled or bypassed
-- [ ] Reused existing components rather than inventing new ones
-- [ ] If auth/session touched: sign-out clears all state (`docs/auth-and-sessions.md`)
+- [ ] No token or secret written to a kubeconfig; `~/.kube/config` untouched
+- [ ] If auth touched: `logout` removes the token cache and any admin kubeconfig
 
 ## NEEDS CLARIFICATION
 

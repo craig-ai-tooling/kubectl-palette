@@ -3,14 +3,9 @@
 Primary context file for **every** AI agent working in this repo (Claude Code, Copilot,
 Cursor, Codex, or a human). Read this first. Everything else loads on demand.
 
-> `<FILL IN>` markers are the only things a new project must replace.
-
----
-
 ## Why
 
-`<FILL IN: one paragraph. What does this project do, and for whom? If an agent has
-to guess the purpose, it will guess wrong and build the wrong thing.>`
+kubectl-palette is a kubectl plugin for Spectro Cloud Palette. A user logs in once in a browser through Palette's OIDC provider, names a cluster, and plain kubectl in that terminal runs against it, with no kube contexts to manage. It keeps a local index of cluster names so it stays fast for one cluster or a thousand, and fetches a kubeconfig only the first time a cluster is used. It is a prototype to test the experience and propose it to Spectro Cloud engineering as a product feature; the first target user is a platform team replacing Tanzu's kubectl vsphere login.
 
 ---
 
@@ -18,8 +13,9 @@ to guess the purpose, it will guess wrong and build the wrong thing.>`
 
 | Path | What lives here |
 |---|---|
-| `<FILL IN: src/>` | `<FILL IN: application code>` |
-| `<FILL IN: tests/>` | `<FILL IN: test suites>` |
+| `cmd/kubectl-palette/` | CLI entry point |
+| `internal/` | Application packages (index, config, token store) |
+| `internal/**/*_test.go` | Test suites |
 | `docs/` | Standards, loaded on demand (see Progressive disclosure) |
 | `ralph/` | Autonomous loop: plan, prompt, progress notebook |
 | `.specify/` | Spec Kit: constitution, templates, feature specs |
@@ -34,13 +30,13 @@ Keep this table honest. A stale command here costs more than a missing one.
 
 | Task | Command |
 |---|---|
-| Install | `<FILL IN: npm ci>` |
-| Build | `<FILL IN: npm run build>` |
-| Test (all) | `<FILL IN: npm test>` |
-| Test (single) | `<FILL IN: npm test -- path/to/file.test.ts>` |
-| Lint | `<FILL IN: npm run lint>` |
-| Format | `<FILL IN: npm run format>` |
-| Typecheck | `<FILL IN: npm run typecheck>` |
+| Install | `go mod download` |
+| Build | `go build ./...` |
+| Test (all) | `go test ./...` |
+| Test (single) | `go test ./internal/index -run TestName` |
+| Lint | `test -z "$(gofmt -l .)"` |
+| Format | `gofmt -w .` |
+| Typecheck | `go vet ./...` |
 
 **Definition of done** — a change is not done until build, test, and lint all pass.
 CI runs exactly these commands; do not hand-wave them locally.
@@ -61,7 +57,7 @@ spec is ambiguous, stop and ask — do not invent requirements.
 **2. Quick fix.** A typo, a one-line bug, a bad copy string. No spec, no ceremony.
 Fix it, prove it, then append one line to `docs/fixes-log.md`:
 ```
-- 2026-01-15 — Logout left stale token in localStorage; clear on signOut(). (#42)
+- 2026-01-15 — logout left the token cache on disk; remove it in logout. (#42)
 ```
 
 **3. GitHub issue → automated PR.** Label an issue `claude-fix`. A runner picks it
@@ -75,10 +71,8 @@ Do not read all of these. Read the one that matches what you are about to change
 
 | Touching… | Read |
 |---|---|
-| UI, layout, spacing, colour | `docs/design-system.md` |
-| A button, form, modal, nav | `docs/components.md` |
-| Login, session, token, logout | `docs/auth-and-sessions.md` |
-| User input, authz, secrets, routes | `docs/security.md` |
+| Commands, UX, auth flow, speed budget, open questions | `docs/design.md` |
+| Tokens, kubeconfigs, file paths, TLS, logging | `docs/security.md` |
 | Anything at all | this file |
 
 ---
@@ -87,19 +81,23 @@ Do not read all of these. Read the one that matches what you are about to change
 
 One example each. Match the surrounding code over the example if they conflict.
 
-**Naming** — `<FILL IN>`
-```
-<FILL IN: e.g. components PascalCase, hooks useCamelCase, files kebab-case>
+**Naming** — gofmt everything. Package names are lower-case single words. Exported identifiers have a doc comment.
+```go
+// Index is the local cache of cluster names read by completion and the picker.
+type Index struct{ ... }
 ```
 
 **Errors** — never swallow. Fail loud, with context.
-```
-<FILL IN: e.g. throw new AppError('checkout.payment_failed', { orderId }, cause)>
+Wrap with `%w`. User-facing errors say what to run next.
+```go
+return fmt.Errorf("fetch kubeconfig for %s: %w", name, err)
 ```
 
-**Tests** — `<FILL IN: what a test must cover before a PR is opened>`
-```
-<FILL IN: one canonical test example>
+**Tests** — table-driven. An `httptest` server stands in for Palette. No live network in `go test`.
+```go
+for _, tc := range []struct{ name, in, want string }{{"plain", "a", "a"}} {
+	t.Run(tc.name, func(t *testing.T) { /* assert tc.want */ })
+}
 ```
 
 **Comments** — explain *why*, never *what*. If the code needs a "what" comment,
@@ -130,4 +128,4 @@ in a PR — that is a code change with a review, which is the point.
 - **Never invent a requirement.** Unknown → `NEEDS CLARIFICATION` → ask.
 - **Never leave the tree broken.** Build + test + lint green before you commit.
 - **Prefer editing over creating.** A new file needs a reason.
-- Reuse what `docs/components.md` already defines. Do not invent a second button.
+- **Never write a token or secret into a kubeconfig, and never touch `~/.kube/config`.** See `docs/security.md`.

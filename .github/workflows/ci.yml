@@ -29,12 +29,10 @@ jobs:
         run: |
           set -e
           for f in AGENTS.md CLAUDE.md README.md \
-                   docs/design-system.md docs/components.md \
-                   docs/auth-and-sessions.md docs/security.md docs/fixes-log.md \
+                   docs/design.md docs/security.md docs/fixes-log.md \
                    ralph/PROMPT.md ralph/IMPLEMENTATION_PLAN.md ralph/PROGRESS.md ralph/loop.sh \
                    .github/scripts/check-action-pins.sh \
-                   .claude/settings.json .specify/memory/constitution.md \
-                   plugin/.claude-plugin/plugin.json plugin/skills/start-project/SKILL.md; do
+                   .claude/settings.json .specify/memory/constitution.md; do
             [ -f "$f" ] || { echo "::error::missing required file: $f"; exit 1; }
           done
           echo "All required files present."
@@ -71,11 +69,6 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck -S warning .claude/hooks/*.sh ralph/loop.sh .claude/statusline.sh .github/scripts/*.sh
-          # The skill's bundled scripts ship to users; lint them too. Guarded
-          # because plugin/ is removed from generated projects.
-          if [ -d plugin/skills/start-project/scripts ]; then
-            shellcheck -S warning plugin/skills/start-project/scripts/*.sh
-          fi
 
       - name: Hook behaviour tests
         run: ./.claude/hooks/test-hooks.sh
@@ -112,9 +105,7 @@ jobs:
           echo "No secret-like files tracked."
 
   # ---------------------------------------------------------------------------
-  # Project checks. These are the commands from AGENTS.md — keep the two in sync.
-  # Skipped until a stack is chosen, so a fresh template is green rather than red.
-  # Delete the `if:` guard once you fill these in.
+  # Project checks. These are the commands from AGENTS.md. Keep the two in sync.
   # ---------------------------------------------------------------------------
   project:
     name: Build / test / lint
@@ -123,39 +114,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # hashFiles() is not available in a job-level `if`, so detect here and
-      # gate the steps below. Until a stack exists these no-op instead of
-      # failing a fresh clone.
-      - name: Detect stack
-        id: stack
-        run: |
-          if ls package.json pyproject.toml go.mod Cargo.toml >/dev/null 2>&1; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "No stack manifest yet. Fill in the AGENTS.md commands and these steps."
-          fi
-
-      # <FILL IN> language setup, e.g.:
-      # - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-      #   with: { node-version: '22', cache: 'npm' }
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
 
       - name: Install
-        if: steps.stack.outputs.present == 'true'
-        run: 'echo "<FILL IN: npm ci>"'
+        run: go mod download
 
       - name: Lint
-        if: steps.stack.outputs.present == 'true'
-        run: 'echo "<FILL IN: npm run lint>"'
+        run: test -z "$(gofmt -l .)"
 
       - name: Typecheck
-        if: steps.stack.outputs.present == 'true'
-        run: 'echo "<FILL IN: npm run typecheck>"'
+        run: go vet ./...
 
       - name: Test
-        if: steps.stack.outputs.present == 'true'
-        run: 'echo "<FILL IN: npm test>"'
+        run: go test ./...
 
       - name: Build
-        if: steps.stack.outputs.present == 'true'
-        run: 'echo "<FILL IN: npm run build>"'
+        run: go build ./...
