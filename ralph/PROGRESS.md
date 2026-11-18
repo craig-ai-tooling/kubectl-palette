@@ -50,12 +50,12 @@ refresh, kubeconfig rewrite, shell hook, and the commands `login`, `token`, `syn
 | Command | Time |
 |---|---|
 | `sync` (2 concurrent calls) | 1.9 to 6.2 s (one 14.5 s outlier) |
-| `use loyalty-dev` cold (1 kubeconfig fetch) | 1.1 to 1.8 s |
-| `use loyalty-dev` warm (0 API calls) | 4 ms |
+| `use cluster-a` cold (1 kubeconfig fetch) | 1.1 to 1.8 s |
+| `use cluster-a` warm (0 API calls) | 4 ms |
 | `token`, valid cached ID token (0 network) | 2 to 4 ms |
 | `token`, silent refresh | 0.8 s |
-| `exec loyalty-dev -- get ns` (cached kubeconfig) | 87 ms |
-| `exec voc-tenant-1 -- auth whoami` (first use, fetch included) | 1.8 s |
+| `exec cluster-a -- get ns` (cached kubeconfig) | 87 ms |
+| `exec cluster-b -- auth whoami` (first use, fetch included) | 1.8 s |
 | bash hook: eval, `kubectl palette use`, `kubectl get ns`, `current` | 148 ms |
 
 `auth whoami` showed the user's email and the Palette team groups.
@@ -110,7 +110,7 @@ created was used for the read-only live checks below.
 | picker, first paint on a pty (median of 15) | 10.8 ms (p95 13.0) | 21.1 ms (p95 25.2) |
 
 Index files were made with `hack/synth-index.py`. The live tenant (80 clusters): picker first
-paint 8 ms, `__complete use loy` 4 ms, `exec loyalty-dev -- get ns` 91 ms.
+paint 8 ms, `__complete use loy` 4 ms, `exec cluster-a -- get ns` 91 ms.
 **Packaging proof:** `goreleaser release --snapshot --clean` (v2.20.2) built all six targets and
 the archives; the linux binary prints the stamped version. krew v0.5.0 (sha256 checked against the
 published file) in a scratch KREW_ROOT: `kubectl krew install --manifest=... --archive=...`, then

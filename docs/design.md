@@ -134,13 +134,13 @@ using kubelogin v1.36.4 and one browser login.
   returned 200. One browser login therefore covers the cluster index, kubeconfig
   fetches and cluster access, with no API key.
 - The refresh token is a Palette-signed JWT with the same session claim as the ID token.
-  Using it as an API session works today but is undocumented. See "Ask to engineering".
+  Using it as an API session works today but is undocumented. See "Gaps a product version would close".
 - A hand-rolled authorization-code exchange (`hack/oidc-probe.py`) was rejected with
   "session not found" for a freshly issued code. kubelogin's exchange succeeds. The only
   visible difference in the auth request is kubelogin's `access_type=offline`. Cause not
   confirmed; the plugin uses the same Go oauth2 library as kubelogin.
 
-## Ask to engineering
+## Gaps a product version would close
 
 1. Bless an API path for OIDC logins: either accept the ID token on the Palette API or
    document the refresh token as a session token. The prototype depends on behavior that
@@ -165,7 +165,6 @@ using kubelogin v1.36.4 and one browser login.
   expiry.
 - kubeswitch: per-terminal `KUBECONFIG` switching over large fleets with a search index.
   It has no Palette store. Its shell-hook and index ideas are reused here.
-- Internal: PLT-1630 / PFR-925 asks for retrieving cluster credentials in the `palette` CLI.
 
 ## Packaging
 

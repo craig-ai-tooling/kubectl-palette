@@ -21,7 +21,7 @@ jobs:
   # ---------------------------------------------------------------------------
   guardrails:
     name: Template guardrails
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -109,7 +109,7 @@ jobs:
   # ---------------------------------------------------------------------------
   project:
     name: Build / test / lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     needs: guardrails
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
