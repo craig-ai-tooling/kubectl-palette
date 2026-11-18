@@ -1,0 +1,47 @@
+# goreleaser v2. Snapshot check: goreleaser release --snapshot --clean
+version: 2
+
+project_name: kubectl-palette
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: kubectl-palette
+    main: ./cmd/kubectl-palette
+    binary: kubectl-palette
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    # main.version is what `kubectl palette version` prints.
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: kubectl-palette
+    ids: [kubectl-palette]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    # hack/krew-manifest.sh reads os and arch back out of these names.
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+
+release:
+  prerelease: auto

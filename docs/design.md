@@ -62,7 +62,7 @@ kubectl palette current | sync | logout
 | `login` | 1 (metadata index) after the browser | under 3 s after the browser returns |
 | `use <cluster>`, first time | 1 (kubeconfig fetch), then cached | under 5 s |
 | `use <cluster>`, cached | 0 | under 100 ms |
-| completion, picker | 0, local index only | under 50 ms |
+| completion, picker | 0, local index only | under 50 ms completion, under 100 ms to first paint |
 | `kubectl` after `use` | 0, cached OIDC token | no added latency |
 
 Rules that follow from the table:
@@ -70,7 +70,34 @@ Rules that follow from the table:
 - Never fetch kubeconfigs in bulk. One fetch, on first use of a cluster.
 - The index refreshes in the background when stale and never blocks a command. A name
   missing from the index triggers one synchronous refresh and one retry.
+- One exception to the one-blocking-call rule: `use <unknown-name>` and `exec <unknown-name>`
+  do a synchronous index refresh (two concurrent API calls) and then, on first use, the
+  kubeconfig fetch. That is two blocking steps. It stays because the alternative is
+  "no such cluster" for a cluster created a minute ago, and the user would have to run
+  `sync` by hand and retry. It happens only on a miss, once per new name, and only when the
+  index was not just rebuilt. A name already in the index never takes this path.
 - A cached kubeconfig is refetched only after a TLS or connection failure against it.
+
+## Completion and picker
+
+- kubectl (1.26 and newer) completes a plugin's arguments by running an executable named
+  `kubectl_complete-palette` found on PATH. It receives the words typed after the plugin
+  name and prints candidates one per line, then a cobra directive line (`:4`, no file
+  completion). The binary answers as that completer when started under that name, so a
+  symlink is enough. `kubectl palette completion install` creates it next to the binary
+  (or in `--dir`). `shell-init` prints a one-line hint on stderr when the link is missing.
+- Candidates come from the index file only. A name used in two projects is offered as
+  `project/cluster`. Subcommand names, `--admin`, `--no-fuzzy` and `--refresh` are completed too, but nothing after `--`.
+  A missing index gives no candidates and no error.
+- `use` with no name on a TTY opens the fuzzy picker over `project/cluster`, with `admin`
+  and `no-oidc` shown as words after the name, so typing them filters. Palette's metadata
+  call does not say whether a cluster has OIDC, so the index learns it: a kubeconfig fetch
+  that returns 404 sets `no_oidc` on that entry, a later successful fetch clears it, and a
+  rebuild carries it over by cluster uid. `--no-fuzzy`, a missing terminal or Windows fall
+  back to the numbered list.
+- The picker is written against `golang.org/x/term`. go-fuzzyfinder (tcell) was tried first
+  and its package init added about 26 ms to every process start, which would land on every
+  `kubectl` call through the `token` exec credential.
 
 ## Auth
 
@@ -85,16 +112,52 @@ Rules that follow from the table:
 - Group claims are required: platform teams bind RBAC to groups in the cluster profile.
 - Headless hosts need `ssh -L 8000:localhost:8000` until Palette offers a device-code flow.
 
+## Login test results (11/18/26)
+
+Run with `hack/kubelogin-probe.py` and `hack/token-followup.py` against a SaaS tenant,
+using kubelogin v1.36.4 and one browser login.
+
+- The login returns an ID token (60 minute lifetime) and a refresh token (4 hours).
+- The ID token carries `groups`, populated with the user's Palette teams, with only the
+  `openid profile email` scopes requested. No `groups` scope is needed.
+- One ID token authenticated to 7 of 8 OIDC clusters in the tenant (4 direct, 3 through
+  the Spectro proxy). Each cluster's SelfSubjectReview returned the user's email as the
+  username and the Palette teams as groups. The eighth failed on a TLS hostname mismatch
+  at its proxy endpoint before any auth took place.
+- Silent refresh works: `--force-refresh` returned a new ID token in 0.6 s with no
+  browser, and a new refresh token with a fresh 4 hour expiry. The session slides for
+  as long as it is used at least once every 4 hours.
+- A kubelogin call with a valid cached token takes 6 ms.
+- The Palette API rejects the ID token (401, raw and Bearer).
+- The Palette API accepts the refresh token as a raw `Authorization` header. With it,
+  `/v1/users/me`, the cluster metadata index (2.1 s) and `kubeconfigclient` (0.8 s) all
+  returned 200. One browser login therefore covers the cluster index, kubeconfig
+  fetches and cluster access, with no API key.
+- The refresh token is a Palette-signed JWT with the same session claim as the ID token.
+  Using it as an API session works today but is undocumented. See "Gaps a product version would close".
+- A hand-rolled authorization-code exchange (`hack/oidc-probe.py`) was rejected with
+  "session not found" for a freshly issued code. kubelogin's exchange succeeds. The only
+  visible difference in the auth request is kubelogin's `access_type=offline`. Cause not
+  confirmed; the plugin uses the same Go oauth2 library as kubelogin.
+
+## Gaps a product version would close
+
+1. Bless an API path for OIDC logins: either accept the ID token on the Palette API or
+   document the refresh token as a session token. The prototype depends on behavior that
+   is not documented.
+2. Add a device-code flow for headless hosts.
+3. Confirm the metadata index stays a single fast call at 1,000 or more clusters, or
+   add a lightweight name and uid listing.
+4. Ship the plugin with Palette (served from the console, as Tanzu serves its plugin).
+
 ## Open
 
-1. Does the Palette API accept the OIDC login token as `Authorization`? If yes, one
-   browser login covers both the cluster index and cluster access. If no, the prototype
-   uses an API key for the index and the gap becomes the request to engineering.
-   Test: `hack/oidc-probe.py`.
-2. Does the token carry groups (Palette teams), by default or with a `groups` scope?
-3. Is a refresh token issued (`offline_access`), and how long does the ID token live?
-4. Does the metadata call stay a single fast call at 1,000 clusters? Seen at 131 only.
-5. Self-hosted Palette and VerteX: issuer host, private CA trust, no `--insecure`.
+1. Does the metadata call stay a single fast call at 1,000 clusters? Seen at 131 only.
+2. Self-hosted Palette and VerteX: issuer host, private CA trust, no `--insecure`.
+3. Clusters on a customer's own IdP instead of Palette as IdP: cluster access works
+   through that IdP, but the API session above does not exist, so the index needs an
+   API key.
+4. Refresh-token behavior after 4 hours idle, and with tenant SSO or MFA enforced.
 
 ## Prior art
 
@@ -102,10 +165,19 @@ Rules that follow from the table:
   expiry.
 - kubeswitch: per-terminal `KUBECONFIG` switching over large fleets with a search index.
   It has no Palette store. Its shell-hook and index ideas are reused here.
-- Internal: PLT-1630 / PFR-925 asks for retrieving cluster credentials in the `palette` CLI.
 
 ## Packaging
 
-Single Go binary `kubectl-palette`. goreleaser builds for macOS, Linux and Windows
-(amd64, arm64). A krew manifest installs it from a private krew index until it is ready
-for the public krew-index.
+Single Go binary `kubectl-palette`. goreleaser (`.goreleaser.yaml`) builds linux, darwin and
+windows on amd64 and arm64, stamps `main.version` through ldflags, and writes tar.gz
+archives (zip on Windows) that include `LICENSE`, plus `checksums.txt`.
+
+The krew manifest is `deploy/krew/palette.yaml`, a template. `hack/krew-manifest.sh
+<version> <base-url>` fills the version, URIs and sha256 values from `dist/checksums.txt`,
+so the manifest is never edited by hand. Windows entries use `bin: kubectl-palette.exe`.
+Krew installs it from a private krew index until it is ready for the public krew-index.
+
+`.github/workflows/release.yml` runs goreleaser on a `v*` tag. A real `krew install` from a
+URL needs publicly downloadable release assets; this repo is private, so today the
+supported paths are a local manifest with a local archive, and copying the binary onto PATH
+(see the README).

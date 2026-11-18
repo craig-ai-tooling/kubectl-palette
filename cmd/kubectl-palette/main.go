@@ -2,51 +2,42 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"io"
 	"os"
+	"os/signal"
+
+	"github.com/craig-ai-tooling/kubectl-palette/internal/cli"
+	"github.com/craig-ai-tooling/kubectl-palette/internal/config"
 )
 
 // version is overridden at build time with -ldflags.
 var version = "dev"
 
-var planned = []string{"login", "use", "exec", "current", "sync", "logout", "token", "shell-init"}
-
-const usage = `usage: kubectl palette <command>
-
-commands:
-  login        log in through the browser (not implemented yet)
-  use          target a cluster in this terminal (not implemented yet)
-  exec         run kubectl against a cluster once (not implemented yet)
-  current      show the current target (not implemented yet)
-  sync         refresh the local cluster index (not implemented yet)
-  logout       remove cached credentials (not implemented yet)
-  token        exec-credential plugin for kubectl (not implemented yet)
-  shell-init   print the shell hook for zsh or bash (not implemented yet)
-  version      print the version
-`
-
-// run executes the CLI and returns the process exit code.
-func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
-		return 2
-	}
-	cmd := args[0]
-	if cmd == "version" {
-		fmt.Fprintln(stdout, version)
-		return 0
-	}
-	for _, p := range planned {
-		if p == cmd {
-			fmt.Fprintf(stderr, "kubectl-palette %s: not implemented yet\n", cmd)
-			return 2
-		}
-	}
-	fmt.Fprintf(stderr, "kubectl-palette: unknown command %q\n\n%s", cmd, usage)
-	return 2
-}
-
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	paths, err := config.DefaultPaths(os.Getenv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "kubectl-palette:", err)
+		os.Exit(1)
+	}
+	self, _ := os.Executable()
+	args := os.Args[1:]
+	// kubectl completes plugin arguments by running kubectl_complete-palette, so the
+	// binary answers completion when started under that name (a symlink is enough).
+	if cli.IsCompleterName(os.Args[0]) {
+		args = append([]string{"__complete"}, args...)
+	}
+	app := &cli.App{
+		Version: version, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
+		Getenv: os.Getenv, Paths: paths,
+		StdoutIsTTY: cli.IsTTY(os.Stdout), StdinIsTTY: cli.IsTTY(os.Stdin),
+		OpenBrowser: cli.OpenBrowserDefault,
+		SpawnSync:   func() error { return cli.SpawnBackgroundSync(self) },
+		RunKubectl:  cli.RunKubectlDefault,
+		SpawnShell:  cli.SpawnShellDefault,
+		Exe:         os.Args[0], RealExe: self,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	os.Exit(app.Run(ctx, args))
 }
