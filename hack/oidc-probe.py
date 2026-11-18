@@ -106,7 +106,9 @@ def main():
         say(f"FAILED at browser step: {result if result else 'timed out, no callback received'}")
         return 1
     if result.get("state") != state:
-        say(f"WARNING: state mismatch (got {'none' if 'state' not in result else 'a different value'}); continuing")
+        # An unbound callback could carry someone else's authorization code.
+        say(f"FAILED: OAuth state {'missing' if 'state' not in result else 'mismatch'}; refusing to exchange the code")
+        return 1
 
     tok = None
     for basic in (True, False):
