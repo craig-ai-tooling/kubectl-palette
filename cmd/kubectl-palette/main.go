@@ -32,7 +32,7 @@ func main() {
 		Getenv: os.Getenv, Paths: paths,
 		StdoutIsTTY: cli.IsTTY(os.Stdout), StdinIsTTY: cli.IsTTY(os.Stdin),
 		OpenBrowser: cli.OpenBrowserDefault,
-		SpawnSync:   func() error { return cli.SpawnBackgroundSync(self) },
+		SpawnSync:   func(tenant string) error { return cli.SpawnBackgroundSync(self, tenant) },
 		RunKubectl:  cli.RunKubectlDefault,
 		SpawnShell:  cli.SpawnShellDefault,
 		Exe:         os.Args[0], RealExe: self,

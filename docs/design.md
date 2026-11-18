@@ -12,7 +12,7 @@ First target: a platform team replacing Tanzu's `kubectl vsphere login`.
 ## User experience
 
 ```
-kubectl palette login                          # browser opens once
+kubectl palette login --server https://palette.example.com --tenant acme   # browser opens once
 kubectl palette use payments-prod              # this terminal now targets it
 kubectl get pods                               # plain kubectl
 kubectl palette use                            # no name: fuzzy picker over the local index
@@ -29,6 +29,74 @@ kubectl palette current | sync | logout
   subshell. `exec` needs neither.
 - Duplicate cluster names across projects resolve as `project/cluster`.
 - With exactly one cluster in the index, `login` selects it.
+
+## Tenants
+
+One login covers one Palette tenant. Several tenants, on one server or on different ones,
+stay logged in side by side. Each is a saved tenant entry with its own config, session,
+index and cluster files.
+
+```
+kubectl palette login --server https://palette.example.com --tenant acme
+kubectl palette login --server https://palette.example.com --tenant globex
+kubectl palette tenants               # one line per entry: active marker, name, org, server, state
+kubectl palette tenants --available   # also lists orgs on this account with no entry yet
+kubectl palette tenant globex         # make globex the active entry (no name: show it)
+kubectl palette use web --tenant acme # one command against another entry
+kubectl palette logout --tenant acme  # one entry; --all for every entry
+```
+
+Layout. The entry `default` is the original flat layout and needs no migration:
+`<Home>/config.json`, `session.json`, `index.json`, and cluster files at
+`<KubeDir>/<project>/<cluster>.yaml`. A named entry lives in `<Home>/tenants/<name>/` and
+`<KubeDir>/.tenants/<name>/<project>/<cluster>.yaml`. `<Home>/active` holds the active
+entry name. Entry names match `^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$` and cannot be
+`default` for a named entry. `.tenants` is reserved like `.admin`, so no project can
+collide with it.
+
+Selection, for every command except `token`: `--tenant`, then `KUBECTL_PALETTE_TENANT`,
+then `<Home>/active`, then `default` if its config exists, then the only entry if there is
+exactly one. A name that matches no entry is an error that lists the saved ones. A stale
+active marker is ignored.
+
+`token` is different. With no flag it always means `default`, never the active entry, and
+`token --tenant <name>` means exactly that entry. Cluster files written for a named entry
+carry `args: [token, --tenant, <name>]`. A cluster file therefore never sends one tenant's
+token to a cluster in another tenant, whatever is active when kubectl runs.
+
+### Resolving a server and tenant
+
+`login --server <url> [--tenant <org | tenant UID>]` needs no OIDC file and no client
+secret. Checked live against SaaS on 11/18/26:
+
+- The issuer is `<scheme>://<rootDomain>/v1/oidc/tenant/<tenantUid>` and the OIDC client
+  id is the tenant UID (24 lowercase hex). The client secret is optional.
+- `GET <base>/v1/auth/org` needs no auth. `orgName` is `root` on the shared root host and
+  the org name on `https://<org>.<rootDomain>`. An unknown org host answers 404
+  `TenantNotFound`.
+- The tenant UID is not a field of that reply. It is the `tenant` value inside the base64
+  `state` parameter of the SSO `redirectUri` entries (accepted only if it is 24 lowercase
+  hex). Some tenants publish no usable entry. Then the user passes the UID or an OIDC
+  file with `--from-kubeconfig`.
+- `<base>/v1/oidc/tenant/<uid>/.well-known/jwks.json` is 200 for a real UID and 404
+  otherwise. The discovery document's `issuer` is canonical (on SaaS always the root host).
+- With a session, `GET /v1/users/me` gives `status.tenant.orgName` and `tenantUid`, and
+  `GET /v1/auth/orgs` lists the orgs the account belongs to.
+
+Steps: normalize the server to scheme and host (https required, loopback excepted), find
+the org host, read the UID, confirm it with JWKS, read the issuer from discovery, and
+require the issuer host to be the server host, the root domain or a subdomain of it. The
+API URL is the issuer's scheme and host unless `--api-url` is given. The entry name is
+`--name`, else the org name, else the `orgName` from `/v1/users/me`. An entry that holds a
+different issuer is never overwritten: the user passes `--name`. Self-hosted and dedicated
+installs are assumed to use `<tenant>.<domain>` hosts the same way. That is not verified.
+
+The older forms (`--from-kubeconfig`, `--issuer` with `--client-id`, `--bootstrap-json`,
+`--import-kubelogin-cache`) still work. They configure the entry named by `--name`
+(default `default`) and wipe that one entry if its issuer changes.
+
+`--ca-file <pem>` saves an absolute path in the entry's config. Every request for that
+entry trusts the file in addition to the system roots. There is no insecure flag.
 
 ## Measured (11/18/26)
 
@@ -87,7 +155,9 @@ Rules that follow from the table:
   symlink is enough. `kubectl palette completion install` creates it next to the binary
   (or in `--dir`). `shell-init` prints a one-line hint on stderr when the link is missing.
 - Candidates come from the index file only. A name used in two projects is offered as
-  `project/cluster`. Subcommand names, `--admin`, `--no-fuzzy` and `--refresh` are completed too, but nothing after `--`.
+  `project/cluster`. Subcommand names and flags are completed too, but nothing after `--`.
+  Cluster names come from the selected tenant's index. `--tenant` and `tenant <TAB>`
+  complete saved entry names.
   A missing index gives no candidates and no error.
 - `use` with no name on a TTY opens the fuzzy picker over `project/cluster`, with `admin`
   and `no-oidc` shown as words after the name, so typing them filters. Palette's metadata
@@ -153,7 +223,8 @@ using kubelogin v1.36.4 and one browser login.
 ## Open
 
 1. Does the metadata call stay a single fast call at 1,000 clusters? Seen at 131 only.
-2. Self-hosted Palette and VerteX: issuer host, private CA trust, no `--insecure`.
+2. Self-hosted Palette and VerteX: the `<tenant>.<domain>` host scheme is assumed, not
+   verified. Private CAs are handled by `--ca-file`; there is no `--insecure`.
 3. Clusters on a customer's own IdP instead of Palette as IdP: cluster access works
    through that IdP, but the API session above does not exist, so the index needs an
    API key.

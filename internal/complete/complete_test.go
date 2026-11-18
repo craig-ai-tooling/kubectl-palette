@@ -34,7 +34,7 @@ func TestComplete(t *testing.T) {
 		{"flag before name", []string{"exec", "--admin", "so"}, []string{"solo"}},
 		{"second positional is not a cluster", []string{"use", "solo", ""}, nil},
 		{"after double dash is kubectl's", []string{"exec", "solo", "--", "ge"}, nil},
-		{"use flags", []string{"use", "--"}, []string{"--admin", "--no-fuzzy", "--refresh"}},
+		{"use flags", []string{"use", "--"}, []string{"--admin", "--no-fuzzy", "--refresh", "--tenant"}},
 		{"exec flags", []string{"exec", "--a"}, []string{"--admin"}},
 		{"completion", []string{"completion", ""}, []string{"install"}},
 		{"completion flag", []string{"completion", "install", "--"}, []string{"--dir"}},
@@ -72,5 +72,35 @@ func TestNoPluginFlagsAfterDoubleDash(t *testing.T) {
 		if got := Complete(sample(), words); got != nil {
 			t.Errorf("Complete(%v) = %v, want nothing", words, got)
 		}
+	}
+}
+
+func TestCompleteTenants(t *testing.T) {
+	entries := []string{"default", "acme", "globex"}
+	for _, tc := range []struct {
+		name  string
+		words []string
+		want  []string
+	}{
+		{"tenant positional", []string{"tenant", ""}, entries},
+		{"tenant positional prefix", []string{"tenant", "g"}, []string{"globex"}},
+		{"tenant takes one name", []string{"tenant", "acme", ""}, nil},
+		{"--tenant value on use", []string{"use", "--tenant", ""}, entries},
+		{"--tenant value prefix on exec", []string{"exec", "--tenant", "a"}, []string{"acme"}},
+		{"--tenant value on logout", []string{"logout", "--tenant", "g"}, []string{"globex"}},
+		{"--tenant value on login", []string{"login", "--tenant", "a"}, []string{"acme"}},
+		{"--tenant=value", []string{"use", "--tenant=g"}, []string{"--tenant=globex"}},
+		{"cluster after --tenant value", []string{"use", "--tenant", "acme", "pay"}, []string{"payments-dev", "payments-prod"}},
+		{"sync flags", []string{"sync", "--t"}, []string{"--tenant"}},
+		{"logout flags", []string{"logout", "--"}, []string{"--all", "--tenant"}},
+		{"tenants flags", []string{"tenants", "--"}, []string{"--available"}},
+		{"login server flag", []string{"login", "--s"}, []string{"--server"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CompleteWith(sample(), entries, tc.words)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
 	}
 }

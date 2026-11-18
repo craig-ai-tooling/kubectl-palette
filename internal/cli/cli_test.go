@@ -137,7 +137,7 @@ func newHarness(t *testing.T, idExp time.Time) *harness {
 		Version: "test", Stdout: h.out, Stderr: h.errb, Stdin: strings.NewReader(""),
 		Getenv:    func(k string) string { return h.env[k] },
 		Paths:     config.Paths{Home: filepath.Join(dir, "home"), KubeDir: filepath.Join(dir, "kube")},
-		SpawnSync: func() error { h.spawns++; return nil },
+		SpawnSync: func(string) error { h.spawns++; return nil },
 		RunKubectl: func(env, args []string) int {
 			h.kenv, h.kargs = append(h.kenv, env), append(h.kargs, args)
 			return 7

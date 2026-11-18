@@ -120,10 +120,22 @@ func ParseOIDC(raw []byte) (OIDC, error) {
 	return o, ErrNotOIDC
 }
 
+// tokenArgs are the exec arguments of a rewritten file. A named tenant entry is spelled out
+// so the file always asks for that entry's token. Plain `token` means the default entry and
+// never the active one: a cluster file must not send one tenant's token to another tenant's
+// cluster because the active entry changed.
+func tokenArgs(tenant string) []any {
+	if tenant == "" || tenant == "default" {
+		return []any{"token"}
+	}
+	return []any{"token", "--tenant", tenant}
+}
+
 // Rewrite points every OIDC exec user at `kubectl-palette token` and drops everything else
-// from the user entry, so the file holds no client secret and no token. secrets are values
+// from the user entry, so the file holds no client secret and no token. tenant is the entry
+// the file belongs to ("" or "default" for the flat default entry). secrets are values
 // that must not appear in the output; finding one is an error.
-func Rewrite(raw []byte, secrets ...string) ([]byte, error) {
+func Rewrite(raw []byte, tenant string, secrets ...string) ([]byte, error) {
 	d, err := parse(raw)
 	if err != nil {
 		return nil, err
@@ -139,7 +151,7 @@ func Rewrite(raw []byte, secrets ...string) ([]byte, error) {
 		um["user"] = map[string]any{"exec": map[string]any{
 			"apiVersion":      "client.authentication.k8s.io/v1beta1",
 			"command":         ExecCommand,
-			"args":            []any{"token"},
+			"args":            tokenArgs(tenant),
 			"interactiveMode": "Never",
 		}}
 		n++

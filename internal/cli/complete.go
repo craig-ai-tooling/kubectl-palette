@@ -28,11 +28,24 @@ func IsCompleterName(argv0 string) bool {
 // then ":<directive>". It reads only the index file. Errors are swallowed on purpose:
 // a completion failure must never print into the user's command line.
 func (a *App) complete(words []string) {
-	idx, err := index.Load(a.Paths.IndexFile())
-	if err != nil {
-		idx = nil
+	root := a.Paths.Root()
+	// The cluster names come from the entry the command line selects: its --tenant, else
+	// the usual selection. Any failure leaves the index empty.
+	flagVal := ""
+	for i, w := range words[:max(len(words)-1, 0)] {
+		if v, ok := strings.CutPrefix(w, "--tenant="); ok {
+			flagVal = v
+		} else if w == "--tenant" && i+1 < len(words)-1 {
+			flagVal = words[i+1]
+		}
 	}
-	out := complete.Complete(idx, words)
+	var idx *index.Index
+	if name, err := a.pickEntry(flagVal); err == nil {
+		if i, err := index.Load(root.ForTenant(name).IndexFile()); err == nil {
+			idx = i
+		}
+	}
+	out := complete.CompleteWith(idx, root.Entries(), words)
 	var b strings.Builder
 	for _, s := range out {
 		b.WriteString(s)
