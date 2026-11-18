@@ -116,8 +116,7 @@ the archives; the linux binary prints the stamped version. krew v0.5.0 (sha256 c
 published file) in a scratch KREW_ROOT: `kubectl krew install --manifest=... --archive=...`, then
 `kubectl palette version` with only krew's bin dir on PATH printed `0.0.1-next`, then
 `kubectl krew uninstall palette`. Exact commands are in README "Install".
-**Left:** nothing in the plan. The release workflow has not run: Actions is blocked on the org by
-a billing problem. Nothing was published and no release exists. Not done or not checked: the
+**Left:** nothing in the plan. The release workflow had not run at this point and no release existed. Not done or not checked: the
 picker on macOS and in Windows terminals (Windows uses the numbered list); darwin and windows
 archives were built but not run; the krew manifest was installed on linux/amd64 only; completion
 was tested with bash-style `kubectl __complete`, not in an interactive zsh or fish; custom CA
@@ -126,3 +125,8 @@ file for self-hosted Palette and Windows refresh locking are still open from ite
 it links by sibling name. A background `sync` started by `use` can overwrite a `no_oidc` flag set
 a moment earlier (rare, the flag is a hint and the next failed fetch sets it again).
 
+## 11/18/26: public repo and first release
+
+The repo is public. CI runs on GitHub-hosted runners through `vars.CI_RUNNER || 'ubuntu-latest'`.
+The release workflow now attaches a generated krew manifest (`palette.yaml`) to each release,
+and CI and release builds use the latest Go 1.26 patch release.

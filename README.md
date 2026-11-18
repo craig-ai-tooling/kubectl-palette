@@ -5,43 +5,44 @@ and plain `kubectl` in that terminal runs against it. No kube contexts to manage
 
 Status: prototype. Every command in the plan works against a live tenant: `login`, `token`,
 `sync`, `use` (with `--admin` and a fuzzy picker), `exec`, `current`, `logout`, `shell-init`,
-and tab completion of cluster names. Packaging (goreleaser archives and a krew manifest) is
-in place but nothing is published. See [`docs/design.md`](docs/design.md) for the design and
+and tab completion of cluster names. Releases are built by goreleaser and install through krew. See [`docs/design.md`](docs/design.md) for the design and
 the open questions.
 
 ## Install
 
-A real `kubectl krew install palette` from a URL needs release assets that anyone can
-download. This repo is private and has no release, so that path does not work today.
-Two paths do.
+**With krew**, from the latest release:
 
-**1. Copy the binary onto PATH.** Build it, or take one from `dist/` after a snapshot
-build, and put it where kubectl finds plugins:
+```
+kubectl krew install --manifest-url=https://github.com/craig-ai-tooling/kubectl-palette/releases/latest/download/palette.yaml
+kubectl palette version
+```
+
+**Without krew**, download the archive for your OS and architecture from the
+[releases page](https://github.com/craig-ai-tooling/kubectl-palette/releases), unpack it,
+and put `kubectl-palette` on your PATH.
+
+**From source:**
 
 ```
 go build -o ~/bin/kubectl-palette ./cmd/kubectl-palette
 ```
 
-**2. Install through krew from a local manifest and archive.** This is the same path a
-published release will use, minus the download. It needs goreleaser, krew and kubectl.
+`krew uninstall palette` leaves the completion link described below; remove
+`kubectl_complete-palette` from krew's bin directory by hand.
+
+### Cutting a release
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It runs the tests, builds the
+archives and `checksums.txt` with goreleaser, then generates the krew manifest with
+`hack/krew-manifest.sh` and attaches it to the release as `palette.yaml`. The manifest is
+never edited by hand. To try the krew path before tagging:
 
 ```
 goreleaser release --snapshot --clean
 VERSION=$(jq -r .version dist/metadata.json)
 hack/krew-manifest.sh "$VERSION" "https://github.com/craig-ai-tooling/kubectl-palette/releases/download/v$VERSION" > dist/palette.yaml
 kubectl krew install --manifest=dist/palette.yaml --archive="dist/kubectl-palette_${VERSION}_linux_amd64.tar.gz"
-kubectl palette version        # prints the stamped version, for example 0.0.1-next
-kubectl krew uninstall palette
 ```
-
-Use the archive that matches your OS and architecture. `hack/krew-manifest.sh` fills the
-version, URIs and sha256 values in `deploy/krew/palette.yaml` from `dist/checksums.txt`;
-the manifest is never edited by hand. `krew uninstall` leaves the completion link
-described below; remove `kubectl_complete-palette` from krew's bin directory by hand.
-
-When the owner publishes releases, pushing a `v*` tag runs `.github/workflows/release.yml`,
-which runs goreleaser. Whether to make the repo public, publish a release or submit the
-manifest to a krew index is the owner's decision. Nothing here does any of it.
 
 ## Quick start
 

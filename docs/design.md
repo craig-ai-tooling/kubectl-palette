@@ -175,9 +175,8 @@ archives (zip on Windows) that include `LICENSE`, plus `checksums.txt`.
 The krew manifest is `deploy/krew/palette.yaml`, a template. `hack/krew-manifest.sh
 <version> <base-url>` fills the version, URIs and sha256 values from `dist/checksums.txt`,
 so the manifest is never edited by hand. Windows entries use `bin: kubectl-palette.exe`.
-Krew installs it from a private krew index until it is ready for the public krew-index.
+Each release carries a generated `palette.yaml`, so krew installs it with
+`--manifest-url` until it is submitted to the public krew-index.
 
-`.github/workflows/release.yml` runs goreleaser on a `v*` tag. A real `krew install` from a
-URL needs publicly downloadable release assets; this repo is private, so today the
-supported paths are a local manifest with a local archive, and copying the binary onto PATH
-(see the README).
+`.github/workflows/release.yml` runs goreleaser on a `v*` tag and attaches the generated
+krew manifest to the release (see the README).
