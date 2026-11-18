@@ -62,7 +62,7 @@ kubectl palette current | sync | logout
 | `login` | 1 (metadata index) after the browser | under 3 s after the browser returns |
 | `use <cluster>`, first time | 1 (kubeconfig fetch), then cached | under 5 s |
 | `use <cluster>`, cached | 0 | under 100 ms |
-| completion, picker | 0, local index only | under 50 ms |
+| completion, picker | 0, local index only | under 50 ms completion, under 100 ms to first paint |
 | `kubectl` after `use` | 0, cached OIDC token | no added latency |
 
 Rules that follow from the table:
@@ -70,7 +70,34 @@ Rules that follow from the table:
 - Never fetch kubeconfigs in bulk. One fetch, on first use of a cluster.
 - The index refreshes in the background when stale and never blocks a command. A name
   missing from the index triggers one synchronous refresh and one retry.
+- One exception to the one-blocking-call rule: `use <unknown-name>` and `exec <unknown-name>`
+  do a synchronous index refresh (two concurrent API calls) and then, on first use, the
+  kubeconfig fetch. That is two blocking steps. It stays because the alternative is
+  "no such cluster" for a cluster created a minute ago, and the user would have to run
+  `sync` by hand and retry. It happens only on a miss, once per new name, and only when the
+  index was not just rebuilt. A name already in the index never takes this path.
 - A cached kubeconfig is refetched only after a TLS or connection failure against it.
+
+## Completion and picker
+
+- kubectl (1.26 and newer) completes a plugin's arguments by running an executable named
+  `kubectl_complete-palette` found on PATH. It receives the words typed after the plugin
+  name and prints candidates one per line, then a cobra directive line (`:4`, no file
+  completion). The binary answers as that completer when started under that name, so a
+  symlink is enough. `kubectl palette completion install` creates it next to the binary
+  (or in `--dir`). `shell-init` prints a one-line hint on stderr when the link is missing.
+- Candidates come from the index file only. A name used in two projects is offered as
+  `project/cluster`. Subcommand names, `--admin` and `--no-fuzzy` are completed too.
+  A missing index gives no candidates and no error.
+- `use` with no name on a TTY opens the fuzzy picker over `project/cluster`, with `admin`
+  and `no-oidc` shown as words after the name, so typing them filters. Palette's metadata
+  call does not say whether a cluster has OIDC, so the index learns it: a kubeconfig fetch
+  that returns 404 sets `no_oidc` on that entry, a later successful fetch clears it, and a
+  rebuild carries it over by cluster uid. `--no-fuzzy`, a missing terminal or Windows fall
+  back to the numbered list.
+- The picker is written against `golang.org/x/term`. go-fuzzyfinder (tcell) was tried first
+  and its package init added about 26 ms to every process start, which would land on every
+  `kubectl` call through the `token` exec credential.
 
 ## Auth
 
@@ -142,6 +169,16 @@ using kubelogin v1.36.4 and one browser login.
 
 ## Packaging
 
-Single Go binary `kubectl-palette`. goreleaser builds for macOS, Linux and Windows
-(amd64, arm64). A krew manifest installs it from a private krew index until it is ready
-for the public krew-index.
+Single Go binary `kubectl-palette`. goreleaser (`.goreleaser.yaml`) builds linux, darwin and
+windows on amd64 and arm64, stamps `main.version` through ldflags, and writes tar.gz
+archives (zip on Windows) that include `LICENSE`, plus `checksums.txt`.
+
+The krew manifest is `deploy/krew/palette.yaml`, a template. `hack/krew-manifest.sh
+<version> <base-url>` fills the version, URIs and sha256 values from `dist/checksums.txt`,
+so the manifest is never edited by hand. Windows entries use `bin: kubectl-palette.exe`.
+Krew installs it from a private krew index until it is ready for the public krew-index.
+
+`.github/workflows/release.yml` runs goreleaser on a `v*` tag. A real `krew install` from a
+URL needs publicly downloadable release assets; this repo is private, so today the
+supported paths are a local manifest with a local archive, and copying the binary onto PATH
+(see the README).

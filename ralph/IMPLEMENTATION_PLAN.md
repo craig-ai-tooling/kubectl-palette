@@ -24,8 +24,8 @@ the `Authorization` header; the ID token is for clusters only.
 - [x] 4. `use` with kubeconfig fetch-and-cache, and the shell-init hook for zsh and bash
 - [x] 5. `exec`, `current` and `logout`
 - [x] 6. `--admin`
-- [ ] 7. Completion and the fuzzy picker
-- [ ] 8. goreleaser and the krew manifest
+- [x] 7. Completion and the fuzzy picker
+- [x] 8. goreleaser and the krew manifest
 
 ---
 

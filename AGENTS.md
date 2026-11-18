@@ -14,7 +14,9 @@ kubectl-palette is a kubectl plugin for Spectro Cloud Palette. A user logs in on
 | Path | What lives here |
 |---|---|
 | `cmd/kubectl-palette/` | CLI entry point |
-| `internal/` | Application packages (index, config, token store) |
+| `internal/` | Application packages (index, config, token store, completion, picker) |
+| `deploy/krew/` | Krew manifest template, filled by `hack/krew-manifest.sh` |
+| `.goreleaser.yaml` | Release builds; snapshot check: `goreleaser release --snapshot --clean` |
 | `internal/**/*_test.go` | Test suites |
 | `docs/` | Standards, loaded on demand (see Progressive disclosure) |
 | `ralph/` | Autonomous loop: plan, prompt, progress notebook |
