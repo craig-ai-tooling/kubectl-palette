@@ -42,6 +42,10 @@ type Entry struct {
 	Project string `json:"project"` // project name
 	Cluster string `json:"cluster"` // cluster name
 	UID     string `json:"uid"`     // Palette cluster UID
+	// IssuerID binds the entry to one Palette login (config.IssuerID of the tenant's issuer).
+	// When set, Upsert refuses a source whose exec args carry a different --issuer-id. When
+	// empty, the source's own value is recorded.
+	IssuerID string `json:"issuer_id,omitempty"`
 }
 
 // Record is an Entry plus the names this package created for it.
@@ -50,6 +54,30 @@ type Record struct {
 	Context string    `json:"context"` // context name, also the cluster entry name
 	User    string    `json:"user"`    // user entry name
 	AddedAt time.Time `json:"added_at"`
+	// File is the absolute path of the kubeconfig the entries were written to. A record
+	// applies only to that file. Records from before this field existed have none and are
+	// taken to belong to whatever file is in use.
+	File string `json:"file,omitempty"`
+}
+
+func absPath(p string) string {
+	if a, err := filepath.Abs(p); err == nil {
+		return a
+	}
+	return p
+}
+
+// split separates the records that apply to the kubeconfig at file from the rest.
+func split(recs []Record, file string) (mine, other []Record) {
+	abs := absPath(file)
+	for _, r := range recs {
+		if r.File == "" || r.File == abs {
+			mine = append(mine, r)
+		} else {
+			other = append(other, r)
+		}
+	}
+	return mine, other
 }
 
 type registryFile struct {
@@ -173,6 +201,27 @@ func loadKubeconfig(path string) (*api.Config, error) {
 	return cfg, nil
 }
 
+// saveKubeconfigFn is the kubeconfig writer. Tests replace it to force a failure.
+var saveKubeconfigFn = saveKubeconfig
+
+// commit writes the registry, then the kubeconfig. If the kubeconfig write fails it puts the
+// previous registry content back (best effort) so the two do not disagree.
+func commit(registryPath string, recs []Record, kubeconfigPath string, cfg *api.Config) error {
+	old, rerr := os.ReadFile(registryPath)
+	if err := writeRegistry(registryPath, recs); err != nil {
+		return err
+	}
+	if err := saveKubeconfigFn(kubeconfigPath, cfg); err != nil {
+		if rerr == nil {
+			_ = writeAtomic(registryPath, old)
+		} else {
+			_ = os.Remove(registryPath)
+		}
+		return err
+	}
+	return nil
+}
+
 func saveKubeconfig(path string, cfg *api.Config) error {
 	if real, err := filepath.EvalSymlinks(path); err == nil {
 		path = real
@@ -184,52 +233,66 @@ func saveKubeconfig(path string, cfg *api.Config) error {
 	return writeAtomic(path, b)
 }
 
-// isPaletteExec reports whether u is only an exec call to kubectl-palette token, and
-// returns the tenant its args name.
-func isPaletteExec(u *api.AuthInfo) (tenant string, err error) {
+// isPaletteExec reports whether u is only an exec call to `kubectl-palette token`, and
+// returns the tenant and issuer id its args name. The accepted args are
+// `token [--tenant X] [--issuer-id H]` in either order, each as `--flag v` or `--flag=v`.
+// A missing --tenant means the default tenant. A missing --issuer-id is returned as "".
+func isPaletteExec(u *api.AuthInfo) (tenant, issuerID string, err error) {
 	if u == nil {
-		return "", errors.New("user entry is missing")
+		return "", "", errors.New("user entry is missing")
 	}
 	switch {
 	case u.ClientCertificate != "" || len(u.ClientCertificateData) > 0:
-		return "", errors.New("user has a client certificate")
+		return "", "", errors.New("user has a client certificate")
 	case u.ClientKey != "" || len(u.ClientKeyData) > 0:
-		return "", errors.New("user has a client key")
+		return "", "", errors.New("user has a client key")
 	case u.Token != "" || u.TokenFile != "":
-		return "", errors.New("user has a token")
+		return "", "", errors.New("user has a token")
 	case u.Username != "" || u.Password != "":
-		return "", errors.New("user has a username or password")
+		return "", "", errors.New("user has a username or password")
 	case u.AuthProvider != nil:
-		return "", errors.New("user has an auth provider")
+		return "", "", errors.New("user has an auth provider")
 	case u.Impersonate != "" || len(u.ImpersonateGroups) > 0 || len(u.ImpersonateUserExtra) > 0 || u.ImpersonateUID != "":
-		return "", errors.New("user impersonates another identity")
+		return "", "", errors.New("user impersonates another identity")
 	case u.Exec == nil:
-		return "", errors.New("user has no exec credential")
+		return "", "", errors.New("user has no exec credential")
 	}
 	ex := u.Exec
-	if filepath.Base(ex.Command) != ExecCommand || ex.Command != ExecCommand {
-		return "", fmt.Errorf("exec command is %q, want %q", ex.Command, ExecCommand)
+	if ex.Command != ExecCommand {
+		return "", "", fmt.Errorf("exec command is %q, want %q", ex.Command, ExecCommand)
 	}
 	if len(ex.Env) > 0 {
-		return "", errors.New("exec block sets environment variables")
+		return "", "", errors.New("exec block sets environment variables")
 	}
 	if len(ex.Args) == 0 || ex.Args[0] != "token" {
-		return "", errors.New("exec args do not start with \"token\"")
+		return "", "", errors.New("exec args do not start with \"token\"")
 	}
 	tenant = DefaultTenant
 	rest := ex.Args[1:]
+	seen := map[string]bool{}
 	for i := 0; i < len(rest); i++ {
-		switch {
-		case rest[i] == "--tenant" && i+1 < len(rest):
-			tenant = rest[i+1]
+		name, val, hasVal := strings.Cut(rest[i], "=")
+		if name != "--tenant" && name != "--issuer-id" {
+			return "", "", fmt.Errorf("unexpected exec arg %q", rest[i])
+		}
+		if !hasVal {
+			if i+1 >= len(rest) {
+				return "", "", fmt.Errorf("exec arg %s has no value", name)
+			}
 			i++
-		case strings.HasPrefix(rest[i], "--tenant="):
-			tenant = strings.TrimPrefix(rest[i], "--tenant=")
-		default:
-			return "", fmt.Errorf("unexpected exec arg %q", rest[i])
+			val = rest[i]
+		}
+		if val == "" || seen[name] {
+			return "", "", fmt.Errorf("exec arg %s is empty or repeated", name)
+		}
+		seen[name] = true
+		if name == "--tenant" {
+			tenant = val
+		} else {
+			issuerID = val
 		}
 	}
-	return tenant, nil
+	return tenant, issuerID, nil
 }
 
 // parseSource picks the cluster, user and namespace the source's current context (or only
@@ -330,17 +393,36 @@ func baseUser(tenant string) string {
 	return "palette-" + tenant
 }
 
-// pickUser returns the user entry name for a tenant: the name already used by one of the
-// tenant's records, else the first of base, base-2, ... that is absent or already one of
-// ours.
-func pickUser(cfg *api.Config, recs []Record, tenant string) string {
+// userReusable reports whether the user entry n can be written for this tenant and issuer:
+// it is absent, or it is a Palette exec user for exactly this tenant and issuer that no
+// record of another tenant or issuer uses.
+func userReusable(cfg *api.Config, recs []Record, n, tenant, issuerID string) bool {
+	u := cfg.AuthInfos[n]
+	if u == nil {
+		return !userClaimedByOther(recs, n, tenant, issuerID)
+	}
+	t, id, err := isPaletteExec(u)
+	if err != nil || t != tenant || id != issuerID {
+		return false
+	}
+	return !userClaimedByOther(recs, n, tenant, issuerID)
+}
+
+func userClaimedByOther(recs []Record, n, tenant, issuerID string) bool {
 	for _, r := range recs {
-		if r.Tenant == tenant && r.User != "" {
-			if u := cfg.AuthInfos[r.User]; u == nil {
-				return r.User
-			} else if _, err := isPaletteExec(u); err == nil {
-				return r.User
-			}
+		if r.User == n && (r.Tenant != tenant || r.IssuerID != issuerID) {
+			return true
+		}
+	}
+	return false
+}
+
+// pickUser returns the user entry name for a tenant: the name one of the tenant's records
+// already uses if it is still reusable, else the first of base, base-2, ... that is reusable.
+func pickUser(cfg *api.Config, recs []Record, tenant, issuerID string) string {
+	for _, r := range recs {
+		if r.Tenant == tenant && r.IssuerID == issuerID && r.User != "" && userReusable(cfg, recs, r.User, tenant, issuerID) {
+			return r.User
 		}
 	}
 	base := baseUser(tenant)
@@ -349,14 +431,39 @@ func pickUser(cfg *api.Config, recs []Record, tenant string) string {
 		if i > 1 {
 			n = fmt.Sprintf("%s-%d", base, i)
 		}
-		u := cfg.AuthInfos[n]
-		if u == nil {
-			return n
-		}
-		if _, err := isPaletteExec(u); err == nil {
+		if userReusable(cfg, recs, n, tenant, issuerID) {
 			return n
 		}
 	}
+}
+
+// ownsNames reports whether the record's context and cluster names can be written: the
+// context still points at our cluster and user, or neither a context nor a cluster entry of
+// that name exists.
+func ownsNames(cfg *api.Config, r Record) bool {
+	c, cl := cfg.Contexts[r.Context], cfg.Clusters[r.Context]
+	if c == nil {
+		return cl == nil
+	}
+	return c.Cluster == r.Context && c.AuthInfo == r.User
+}
+
+// dropUserIfOrphan deletes a user entry we wrote once no context uses it.
+func dropUserIfOrphan(cfg *api.Config, name string) bool {
+	u := cfg.AuthInfos[name]
+	if u == nil {
+		return false
+	}
+	for _, c := range cfg.Contexts {
+		if c.AuthInfo == name {
+			return false
+		}
+	}
+	if _, _, err := isPaletteExec(u); err == nil {
+		delete(cfg.AuthInfos, name)
+		return true
+	}
+	return false
 }
 
 // Item is one cluster for UpsertAll: its identity and the bytes of the plugin's
@@ -383,20 +490,29 @@ func upsertOne(cfg *api.Config, recs []Record, e Entry, source []byte, now time.
 	if err != nil {
 		return Record{}, recs, err
 	}
-	tenant, err := isPaletteExec(srcUser)
+	tenant, issuerID, err := isPaletteExec(srcUser)
 	if err != nil {
 		return Record{}, recs, fmt.Errorf("refusing to copy cluster %q into the kubeconfig: %w", e.Cluster, err)
 	}
 	if tenant != e.Tenant {
 		return Record{}, recs, fmt.Errorf("refusing to copy cluster %q: exec args name tenant %q, entry is tenant %q", e.Cluster, tenant, e.Tenant)
 	}
+	if e.IssuerID != "" && issuerID != e.IssuerID {
+		return Record{}, recs, fmt.Errorf("refusing to copy cluster %q: its kubeconfig was made for a different Palette login (issuer id %q, want %q): fetch it again", e.Cluster, issuerID, e.IssuerID)
+	}
+	e.IssuerID = issuerID
 
 	recs = append([]Record(nil), recs...)
 	var rec Record
+	oldUser := ""
 	if i := findRecord(recs, e.Tenant, e.UID); i >= 0 {
 		rec = recs[i]
+		oldUser = rec.User
 		rec.Entry = e
 		recs = append(recs[:i], recs[i+1:]...)
+		if !ownsNames(cfg, rec) {
+			rec.Context, oldUser = "", ""
+		}
 	} else {
 		stale := -1
 		for i, r := range recs {
@@ -407,15 +523,20 @@ func upsertOne(cfg *api.Config, recs []Record, e Entry, source []byte, now time.
 		}
 		if stale >= 0 {
 			rec = recs[stale]
+			oldUser = rec.User
 			rec.Entry = e
 			rec.AddedAt = now.UTC()
 			recs = append(recs[:stale], recs[stale+1:]...)
+			if !ownsNames(cfg, rec) {
+				rec.Context, oldUser = "", ""
+			}
 		} else {
 			rec = Record{Entry: e, AddedAt: now.UTC()}
 			rec.Context = pickContext(cfg, recs, e)
 		}
 	}
-	rec.User = pickUser(cfg, append(append([]Record{}, recs...), rec), e.Tenant)
+	// The record's old user is not claimed by "another" record: it is ours being replaced.
+	rec.User = pickUser(cfg, recs, e.Tenant, e.IssuerID)
 
 	cl := srcCluster.DeepCopy()
 	cl.LocationOfOrigin = ""
@@ -442,6 +563,9 @@ func upsertOne(cfg *api.Config, recs []Record, e Entry, source []byte, now time.
 		ns = old.Namespace
 	}
 	cfg.Contexts[rec.Context] = &api.Context{Cluster: rec.Context, AuthInfo: rec.User, Namespace: ns}
+	if oldUser != "" && oldUser != rec.User {
+		dropUserIfOrphan(cfg, oldUser)
+	}
 	return rec, append(recs, rec), nil
 }
 
@@ -463,20 +587,28 @@ func UpsertAll(kubeconfigPath, registryPath string, items []Item, now time.Time)
 	}
 	defer unlock()
 
-	recs, err := readRegistry(registryPath)
+	all, err := readRegistry(registryPath)
 	if err != nil {
 		return nil, err
 	}
+	recs, other := split(all, kubeconfigPath)
 	cfg, err := loadKubeconfig(kubeconfigPath)
 	if err != nil {
 		return nil, err
 	}
+	file := absPath(kubeconfigPath)
 	ok := 0
 	for i, it := range items {
 		rec, next, err := upsertOne(cfg, recs, it.Entry, it.Source, now)
 		if err != nil {
 			results[i].Err = err
 			continue
+		}
+		for j := range next {
+			if next[j].UID == rec.UID && next[j].Tenant == rec.Tenant {
+				next[j].File = file
+				rec = next[j]
+			}
 		}
 		recs = next
 		results[i].Record = rec
@@ -485,10 +617,7 @@ func UpsertAll(kubeconfigPath, registryPath string, items []Item, now time.Time)
 	if ok == 0 {
 		return results, nil
 	}
-	if err := writeRegistry(registryPath, recs); err != nil {
-		return nil, err
-	}
-	if err := saveKubeconfig(kubeconfigPath, cfg); err != nil {
+	if err := commit(registryPath, append(recs, other...), kubeconfigPath, cfg); err != nil {
 		return nil, err
 	}
 	return results, nil
@@ -512,53 +641,60 @@ func Upsert(kubeconfigPath, registryPath string, e Entry, source []byte, now tim
 	return res[0].Record, res[0].Err
 }
 
-// removeRecords deletes the kubeconfig entries of every record in drop (by index into recs)
-// and returns the surviving records. It reports whether cfg changed.
-func removeFromConfig(cfg *api.Config, drop []Record) (changed bool) {
-	for _, r := range drop {
+// Removal is the outcome for one removed record.
+type Removal struct {
+	Record Record
+	// EntriesDeleted is true when the context was still ours and was deleted. It is false
+	// when the user had changed or deleted it, so only the record was dropped.
+	EntriesDeleted bool
+}
+
+// removeFromConfig deletes the kubeconfig entries of every record in drop that is still
+// ours. A cluster or user entry goes only once no remaining context references it.
+func removeFromConfig(cfg *api.Config, drop []Record) (deleted []bool, changed bool) {
+	deleted = make([]bool, len(drop))
+	for i, r := range drop {
 		c := cfg.Contexts[r.Context]
 		if c == nil || c.Cluster != r.Context || c.AuthInfo != r.User {
 			continue
 		}
 		delete(cfg.Contexts, r.Context)
-		delete(cfg.Clusters, r.Context)
 		if cfg.CurrentContext == r.Context {
 			cfg.CurrentContext = ""
 		}
-		changed = true
+		deleted[i], changed = true, true
 	}
-	for _, r := range drop {
-		if r.User == "" || cfg.AuthInfos[r.User] == nil {
-			continue
+	for i, r := range drop {
+		if deleted[i] && cfg.Clusters[r.Context] != nil && !clusterUsed(cfg, r.Context) {
+			delete(cfg.Clusters, r.Context)
 		}
-		used := false
-		for _, c := range cfg.Contexts {
-			if c.AuthInfo == r.User {
-				used = true
-				break
-			}
-		}
-		if used {
-			continue
-		}
-		if _, err := isPaletteExec(cfg.AuthInfos[r.User]); err == nil {
-			delete(cfg.AuthInfos, r.User)
+		if r.User != "" && dropUserIfOrphan(cfg, r.User) {
 			changed = true
 		}
 	}
-	return changed
+	return deleted, changed
 }
 
-func apply(kubeconfigPath, registryPath string, pick func(Record, *api.Config) bool) ([]Record, error) {
+func clusterUsed(cfg *api.Config, name string) bool {
+	for _, c := range cfg.Contexts {
+		if c.Cluster == name {
+			return true
+		}
+	}
+	return false
+}
+
+func apply(kubeconfigPath, registryPath string, pick func(Record, *api.Config) bool) ([]Removal, error) {
 	unlock, err := lockRegistry(registryPath)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	recs, err := readRegistry(registryPath)
+	all, err := readRegistry(registryPath)
 	if err != nil {
 		return nil, err
 	}
+	recs, other := split(all, kubeconfigPath)
 	cfg, err := loadKubeconfig(kubeconfigPath)
 	if err != nil {
 		return nil, err
@@ -574,47 +710,90 @@ func apply(kubeconfigPath, registryPath string, pick func(Record, *api.Config) b
 	if len(drop) == 0 {
 		return nil, nil
 	}
-	if err := writeRegistry(registryPath, keep); err != nil {
+	deleted, changed := removeFromConfig(cfg, drop)
+	out := make([]Removal, len(drop))
+	for i, r := range drop {
+		out[i] = Removal{Record: r, EntriesDeleted: deleted[i]}
+	}
+	keep = append(keep, other...)
+	if changed {
+		err = commit(registryPath, keep, kubeconfigPath, cfg)
+	} else {
+		err = writeRegistry(registryPath, keep)
+	}
+	if err != nil {
 		return nil, err
 	}
-	if removeFromConfig(cfg, drop) {
-		if err := saveKubeconfig(kubeconfigPath, cfg); err != nil {
-			return nil, err
-		}
-	}
-	return drop, nil
+	return out, nil
 }
 
-// Remove drops every record for which match returns true. For each one it deletes the
-// context and cluster entry only if the context still points at the cluster and user names
-// the record holds; a context the user re-pointed or deleted is left alone and the record is
-// just dropped. A user entry we created is deleted once no remaining context uses it. If
-// current-context named a removed context it is set to empty. It returns the removed records.
-func Remove(kubeconfigPath, registryPath string, match func(Record) bool) ([]Record, error) {
+func records(rs []Removal) []Record {
+	out := make([]Record, len(rs))
+	for i, r := range rs {
+		out[i] = r.Record
+	}
+	return out
+}
+
+// RemoveDetailed drops every record of this kubeconfig for which match returns true and
+// reports, per record, whether its entries were deleted or the user had changed them. For
+// each record it deletes the context only if it still points at the cluster and user names
+// the record holds, and the cluster and user entries only once no remaining context uses
+// them. If current-context named a removed context it is set to empty.
+func RemoveDetailed(kubeconfigPath, registryPath string, match func(Record) bool) ([]Removal, error) {
 	return apply(kubeconfigPath, registryPath, func(r Record, _ *api.Config) bool { return match(r) })
 }
 
-// Prune is Remove for the records alive reports as false, plus the records whose context
-// no longer exists in the kubeconfig. It returns the removed records.
-func Prune(kubeconfigPath, registryPath string, alive func(Record) bool) ([]Record, error) {
+// Remove is RemoveDetailed that returns only the records.
+func Remove(kubeconfigPath, registryPath string, match func(Record) bool) ([]Record, error) {
+	r, err := RemoveDetailed(kubeconfigPath, registryPath, match)
+	return records(r), err
+}
+
+// PruneDetailed is RemoveDetailed for the records alive reports as false, plus the records
+// whose context no longer exists in the kubeconfig.
+func PruneDetailed(kubeconfigPath, registryPath string, alive func(Record) bool) ([]Removal, error) {
 	return apply(kubeconfigPath, registryPath, func(r Record, cfg *api.Config) bool {
 		return cfg.Contexts[r.Context] == nil || !alive(r)
 	})
 }
 
-// List returns the registry's records sorted by Context. A missing registry is an empty list.
+// Prune is PruneDetailed that returns only the records.
+func Prune(kubeconfigPath, registryPath string, alive func(Record) bool) ([]Record, error) {
+	r, err := PruneDetailed(kubeconfigPath, registryPath, alive)
+	return records(r), err
+}
+
+// List returns every record in the registry, whatever kubeconfig it was written to, sorted
+// by Context. A missing registry is an empty list.
 func List(registryPath string) ([]Record, error) {
 	recs, err := readRegistry(registryPath)
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(recs, func(i, j int) bool { return recs[i].Context < recs[j].Context })
+	sort.Slice(recs, func(i, j int) bool {
+		if recs[i].Context != recs[j].Context {
+			return recs[i].Context < recs[j].Context
+		}
+		return recs[i].File < recs[j].File
+	})
 	return recs, nil
 }
 
-// Lookup returns the record for a tenant and cluster UID. The bool is false when there is none.
-func Lookup(registryPath string, tenant, uid string) (Record, bool, error) {
-	recs, err := readRegistry(registryPath)
+// ListFor is List limited to the records that apply to the kubeconfig at kubeconfigPath.
+func ListFor(kubeconfigPath, registryPath string) ([]Record, error) {
+	all, err := List(registryPath)
+	if err != nil {
+		return nil, err
+	}
+	mine, _ := split(all, kubeconfigPath)
+	return mine, nil
+}
+
+// Lookup returns the record of this kubeconfig for a tenant and cluster UID. The bool is
+// false when there is none.
+func Lookup(kubeconfigPath, registryPath string, tenant, uid string) (Record, bool, error) {
+	recs, err := ListFor(kubeconfigPath, registryPath)
 	if err != nil {
 		return Record{}, false, err
 	}

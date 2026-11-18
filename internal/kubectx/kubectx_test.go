@@ -34,7 +34,7 @@ func newEnv(t *testing.T) env {
 func src(server string, args ...string) []byte {
 	a := ""
 	for _, x := range args {
-		a += fmt.Sprintf("\n      - %s", x)
+		a += fmt.Sprintf("\n      - %q", x)
 	}
 	return []byte(fmt.Sprintf(`apiVersion: v1
 kind: Config
@@ -475,14 +475,14 @@ func TestListAndLookup(t *testing.T) {
 	if len(recs) != 2 || recs[0].Context != "alpha" {
 		t.Fatalf("%v", recs)
 	}
-	r, ok, err := Lookup(e.reg, "default", "u1")
+	r, ok, err := Lookup(e.kc, e.reg, "default", "u1")
 	if err != nil || !ok || r.Cluster != "zeta" {
 		t.Fatalf("%v %v %v", r, ok, err)
 	}
-	if _, ok, _ := Lookup(e.reg, "default", "nope"); ok {
+	if _, ok, _ := Lookup(e.kc, e.reg, "default", "nope"); ok {
 		t.Fatal("found missing uid")
 	}
-	if _, ok, _ := Lookup(e.reg, "eu", "u1"); ok {
+	if _, ok, _ := Lookup(e.kc, e.reg, "eu", "u1"); ok {
 		t.Fatal("tenant ignored")
 	}
 }
