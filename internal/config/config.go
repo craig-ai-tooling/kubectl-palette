@@ -17,6 +17,10 @@ import (
 const (
 	EnvHome    = "KUBECTL_PALETTE_HOME"
 	EnvKubeDir = "KUBECTL_PALETTE_KUBEDIR"
+	// EnvContextFile names the kubeconfig that receives the persistent contexts.
+	EnvContextFile = "KUBECTL_PALETTE_CONTEXT_FILE"
+	// EnvNoContexts set to 1 turns persistent contexts off.
+	EnvNoContexts = "KUBECTL_PALETTE_NO_CONTEXTS"
 )
 
 // Environment variables that pick a tenant entry and a default Palette server.
@@ -41,6 +45,11 @@ const TenantKubeDir = ".tenants"
 type Paths struct {
 	Home    string // config, session and index of the entry
 	KubeDir string // per-cluster kubeconfigs of the entry
+
+	// contextFile is the kubeconfig that receives persistent contexts. DefaultPaths sets
+	// it. A Paths built by hand leaves it empty, which turns the feature off, so a test can
+	// never fall through to the user's real kubeconfig.
+	contextFile string
 
 	entry    string // "" before a selection, which behaves as DefaultEntry
 	rootHome string // Home of the whole plugin, "" when this Paths is already the root
@@ -72,16 +81,31 @@ func (p Paths) Entry() string {
 // Root returns the Paths of the whole plugin, whatever entry p points at.
 func (p Paths) Root() Paths {
 	if p.rootHome == "" {
-		return Paths{Home: p.Home, KubeDir: p.KubeDir}
+		return Paths{Home: p.Home, KubeDir: p.KubeDir, contextFile: p.contextFile}
 	}
-	return Paths{Home: p.rootHome, KubeDir: p.rootKube}
+	return Paths{Home: p.rootHome, KubeDir: p.rootKube, contextFile: p.contextFile}
 }
+
+// WithContextFile returns p with the kubeconfig for persistent contexts set.
+func (p Paths) WithContextFile(path string) Paths {
+	p.contextFile = path
+	return p
+}
+
+// ContextFile is the kubeconfig that receives persistent contexts, "" when none is set.
+// DefaultPaths picks it: $KUBECTL_PALETTE_CONTEXT_FILE, else <KubeDir>/contexts.yaml when
+// $KUBECTL_PALETTE_KUBEDIR redirects the state, else ~/.kube/config.
+func (p Paths) ContextFile() string { return p.contextFile }
+
+// ContextRegistry is the file that records which contexts the plugin created. All tenant
+// entries share it.
+func (p Paths) ContextRegistry() string { return filepath.Join(p.Root().Home, "contexts.json") }
 
 // ForTenant returns the paths of one entry. DefaultEntry (or "") is the flat layout. It
 // does not check the name or that the entry exists.
 func (p Paths) ForTenant(name string) Paths {
 	r := p.Root()
-	out := Paths{Home: r.Home, KubeDir: r.KubeDir, entry: DefaultEntry, rootHome: r.Home, rootKube: r.KubeDir}
+	out := Paths{Home: r.Home, KubeDir: r.KubeDir, contextFile: r.contextFile, entry: DefaultEntry, rootHome: r.Home, rootKube: r.KubeDir}
 	if name != "" && name != DefaultEntry {
 		out.entry = name
 		out.Home = filepath.Join(r.Home, TenantsDir, name)
@@ -139,7 +163,8 @@ func (p Paths) Entries() []string {
 
 // DefaultPaths resolves the locations from the environment and the user's home.
 func DefaultPaths(getenv func(string) string) (Paths, error) {
-	home, kube := getenv(EnvHome), getenv(EnvKubeDir)
+	home, kube, ctx := getenv(EnvHome), getenv(EnvKubeDir), getenv(EnvContextFile)
+	redirected := kube != ""
 	if home == "" || kube == "" {
 		uh, err := os.UserHomeDir()
 		if err != nil {
@@ -151,8 +176,14 @@ func DefaultPaths(getenv func(string) string) (Paths, error) {
 		if kube == "" {
 			kube = filepath.Join(uh, ".kube", "palette")
 		}
+		if ctx == "" && !redirected {
+			ctx = filepath.Join(uh, ".kube", "config")
+		}
 	}
-	return Paths{Home: home, KubeDir: kube}, nil
+	if ctx == "" {
+		ctx = filepath.Join(kube, "contexts.yaml")
+	}
+	return Paths{Home: home, KubeDir: kube, contextFile: ctx}, nil
 }
 
 // File paths under Home.

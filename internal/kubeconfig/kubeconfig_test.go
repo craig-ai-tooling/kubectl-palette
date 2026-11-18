@@ -64,7 +64,7 @@ func TestParseOIDCErrors(t *testing.T) {
 }
 
 func TestRewriteLeavesNoSecret(t *testing.T) {
-	out, err := Rewrite([]byte(sample), "", "SeCrEt", "leaked-token")
+	out, err := Rewrite([]byte(sample), RewriteOptions{Secrets: []string{"SeCrEt", "leaked-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,10 +97,10 @@ func TestRewriteLeavesNoSecret(t *testing.T) {
 
 func TestRewriteRefusesWhenSecretSurvives(t *testing.T) {
 	// the server URL carries the "secret": it is outside the user entry so it survives
-	if _, err := Rewrite([]byte(sample), "", "1.2.3.4"); err == nil {
+	if _, err := Rewrite([]byte(sample), RewriteOptions{Secrets: []string{"1.2.3.4"}}); err == nil {
 		t.Fatal("expected refusal")
 	}
-	if _, err := Rewrite([]byte("users:\n- name: a\n  user:\n    token: x\n"), ""); err != ErrNotOIDC {
+	if _, err := Rewrite([]byte("users:\n- name: a\n  user:\n    token: x\n"), RewriteOptions{}); err != ErrNotOIDC {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -116,7 +116,7 @@ func TestRewriteExecArgsPerTenant(t *testing.T) {
 		{"default", []string{"token"}},
 		{"acme", []string{"token", "--tenant", "acme"}},
 	} {
-		out, err := Rewrite([]byte(sample), tc.tenant, "SeCrEt")
+		out, err := Rewrite([]byte(sample), RewriteOptions{Tenant: tc.tenant, Secrets: []string{"SeCrEt"}})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -233,3 +233,37 @@ func TestConfigNewFieldsRoundTripAndOmitEmpty(t *testing.T) {
 		}
 	}
 }
+
+func TestContextFileResolution(t *testing.T) {
+	h := t.TempDir()
+	get := func(env map[string]string) func(string) string {
+		return func(k string) string { return env[k] }
+	}
+	// A redirected kube dir keeps the context file inside it.
+	p, err := DefaultPaths(get(map[string]string{EnvHome: h, EnvKubeDir: h + "/k"}))
+	if err != nil || p.ContextFile() != h+"/k/contexts.yaml" {
+		t.Fatalf("redirected: %q %v", p.ContextFile(), err)
+	}
+	// An explicit file wins.
+	p, err = DefaultPaths(get(map[string]string{EnvHome: h, EnvKubeDir: h + "/k", EnvContextFile: h + "/x.yaml"}))
+	if err != nil || p.ContextFile() != h+"/x.yaml" {
+		t.Fatalf("explicit: %q %v", p.ContextFile(), err)
+	}
+	// Nothing set: the user's kubeconfig.
+	p, err = DefaultPaths(get(nil))
+	if err != nil || !strings.HasSuffix(filepath.ToSlash(p.ContextFile()), "/.kube/config") {
+		t.Fatalf("default: %q %v", p.ContextFile(), err)
+	}
+	// The file survives Root and ForTenant, and the registry is shared by every entry.
+	q := p.ForTenant("acme")
+	if q.ContextFile() != p.ContextFile() || q.Root().ContextFile() != p.ContextFile() {
+		t.Fatalf("context file lost: %q", q.ContextFile())
+	}
+	if q.ContextRegistry() != p.ContextRegistry() || filepath.Base(p.ContextRegistry()) != "contexts.json" {
+		t.Fatalf("registry %q vs %q", q.ContextRegistry(), p.ContextRegistry())
+	}
+	// A hand-built Paths has no context file.
+	if (Paths{Home: h, KubeDir: h}).ContextFile() != "" {
+		t.Fatal("hand-built Paths must not name a context file")
+	}
+}

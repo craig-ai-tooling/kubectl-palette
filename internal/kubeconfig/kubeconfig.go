@@ -131,11 +131,19 @@ func tokenArgs(tenant string) []any {
 	return []any{"token", "--tenant", tenant}
 }
 
+// RewriteOptions are the arguments of Rewrite. They are named fields so a secret can never
+// be passed where the tenant goes.
+type RewriteOptions struct {
+	// Tenant is the entry the file belongs to ("" or "default" for the flat default entry).
+	Tenant string
+	// Secrets are values that must not appear in the output; finding one is an error.
+	Secrets []string
+}
+
 // Rewrite points every OIDC exec user at `kubectl-palette token` and drops everything else
-// from the user entry, so the file holds no client secret and no token. tenant is the entry
-// the file belongs to ("" or "default" for the flat default entry). secrets are values
-// that must not appear in the output; finding one is an error.
-func Rewrite(raw []byte, tenant string, secrets ...string) ([]byte, error) {
+// from the user entry, so the file holds no client secret and no token.
+func Rewrite(raw []byte, o RewriteOptions) ([]byte, error) {
+	tenant, secrets := o.Tenant, o.Secrets
 	d, err := parse(raw)
 	if err != nil {
 		return nil, err

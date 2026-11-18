@@ -457,7 +457,7 @@ func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin, refr
 			return "", false, cerr
 		}
 		o, _ := kubeconfig.ParseOIDC(raw)
-		raw, err = kubeconfig.Rewrite(raw, a.Paths.Entry(), cfg.ClientSecret, o.ClientSecret)
+		raw, err = kubeconfig.Rewrite(raw, kubeconfig.RewriteOptions{Tenant: a.Paths.Entry(), Secrets: []string{cfg.ClientSecret, o.ClientSecret}})
 		if err != nil {
 			return "", false, fmt.Errorf("rewrite kubeconfig for %s: %w", c.Ref(), err)
 		}
