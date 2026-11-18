@@ -98,8 +98,18 @@ func (p Paths) Save(c Config) error {
 	return WriteFileAtomic(p.ConfigFile(), append(b, '\n'))
 }
 
+// AdminDir is the per-project subdirectory that holds admin kubeconfigs. It cannot be a
+// project or cluster name, so admin and OIDC files can never share a path.
+const AdminDir = ".admin"
+
+// UIDSuffix names the sidecar that records which cluster UID a cached file belongs to.
+const UIDSuffix = ".uid"
+
 // SafeName rejects names that could escape a directory. API names are untrusted.
 func SafeName(name string) error {
+	if name == AdminDir {
+		return fmt.Errorf("unsafe name %q: reserved for admin kubeconfigs", name)
+	}
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
 		return fmt.Errorf("unsafe name %q: refusing to build a path", name)
 	}
@@ -121,16 +131,46 @@ func SafeJoin(base string, names ...string) (string, error) {
 	return p, nil
 }
 
-// ClusterFile is the path of a cluster's kubeconfig. Admin files get their own suffix.
+// ClusterFile is the path of a cluster's kubeconfig. Admin files live in their own
+// subdirectory of the project, so no cluster name can make the two kinds collide.
 func (p Paths) ClusterFile(project, cluster string, admin bool) (string, error) {
-	suffix := ".yaml"
-	if admin {
-		suffix = ".admin.yaml"
-	}
 	if err := SafeName(cluster); err != nil {
 		return "", err
 	}
-	return SafeJoin(p.KubeDir, project, cluster+suffix)
+	if admin {
+		dir, err := SafeJoin(p.KubeDir, project)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(dir, AdminDir, cluster+".yaml"), nil
+	}
+	return SafeJoin(p.KubeDir, project, cluster+".yaml")
+}
+
+// CachedUID reads the cluster UID recorded next to a cached kubeconfig. It never opens the
+// kubeconfig itself. It returns "" when there is no sidecar, which callers treat as untrusted.
+func CachedUID(path string) string {
+	b, err := os.ReadFile(path + UIDSuffix)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// WriteCachedUID records the cluster UID for a cached kubeconfig.
+func WriteCachedUID(path, uid string) error {
+	return WriteFileAtomic(path+UIDSuffix, []byte(uid+"\n"))
+}
+
+// RemoveCluster deletes a cached kubeconfig and its UID sidecar.
+func RemoveCluster(path string) error {
+	var errs []error
+	for _, p := range []string{path + UIDSuffix, path} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // WriteFileAtomic writes data to a mode 600 temp file in the same directory, fsyncs it and

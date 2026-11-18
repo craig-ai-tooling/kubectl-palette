@@ -87,7 +87,7 @@ Rules that follow from the table:
   symlink is enough. `kubectl palette completion install` creates it next to the binary
   (or in `--dir`). `shell-init` prints a one-line hint on stderr when the link is missing.
 - Candidates come from the index file only. A name used in two projects is offered as
-  `project/cluster`. Subcommand names, `--admin` and `--no-fuzzy` are completed too.
+  `project/cluster`. Subcommand names, `--admin`, `--no-fuzzy` and `--refresh` are completed too, but nothing after `--`.
   A missing index gives no candidates and no error.
 - `use` with no name on a TTY opens the fuzzy picker over `project/cluster`, with `admin`
   and `no-oidc` shown as words after the name, so typing them filters. Palette's metadata

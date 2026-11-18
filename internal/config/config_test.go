@@ -28,12 +28,57 @@ func TestClusterFile(t *testing.T) {
 		t.Fatalf("got %q %v", got, err)
 	}
 	got, _ = p.ClusterFile("proj", "c1", true)
-	if got != "/k/proj/c1.admin.yaml" {
+	if got != "/k/proj/.admin/c1.yaml" {
 		t.Fatalf("got %q", got)
 	}
 	for _, bad := range [][2]string{{"..", "c"}, {"p", ".."}, {"p/q", "c"}, {"p", "../../x"}, {"", "c"}} {
 		if _, err := p.ClusterFile(bad[0], bad[1], false); err == nil {
 			t.Errorf("ClusterFile(%q,%q) should fail", bad[0], bad[1])
+		}
+	}
+}
+
+// A cluster named "foo.admin" must not share a path with the admin file of "foo".
+func TestAdminAndOIDCPathsNeverCollide(t *testing.T) {
+	p := Paths{Home: "/h", KubeDir: "/k"}
+	for _, names := range [][2]string{{"foo", "foo.admin"}, {"foo", "foo"}, {"x.admin", "x"}} {
+		a, err1 := p.ClusterFile("proj", names[0], true)
+		o, err2 := p.ClusterFile("proj", names[1], false)
+		if err1 != nil || err2 != nil || a == o {
+			t.Errorf("admin(%q)=%q oidc(%q)=%q %v %v", names[0], a, names[1], o, err1, err2)
+		}
+	}
+	// The reserved directory name cannot be a project or a cluster.
+	if _, err := p.ClusterFile(".admin", "c", false); err == nil {
+		t.Error("project .admin accepted")
+	}
+	for _, admin := range []bool{false, true} {
+		if _, err := p.ClusterFile("proj", ".admin", admin); err == nil {
+			t.Errorf("cluster .admin accepted (admin=%v)", admin)
+		}
+	}
+}
+
+func TestCachedUIDSidecar(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "p", "c.yaml")
+	if got := CachedUID(path); got != "" {
+		t.Fatalf("no sidecar must read empty, got %q", got)
+	}
+	if err := WriteFileAtomic(path, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteCachedUID(path, "uid-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := CachedUID(path); got != "uid-1" {
+		t.Fatalf("got %q", got)
+	}
+	if err := RemoveCluster(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{path, path + UIDSuffix} {
+		if _, err := os.Stat(f); err == nil {
+			t.Errorf("%s survived RemoveCluster", f)
 		}
 	}
 }

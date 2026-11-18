@@ -78,11 +78,12 @@ kubectl palette use payments-prod --admin    # only if you hold the admin downlo
 kubectl palette exec payments-prod -- get pods
 kubectl palette current
 kubectl palette sync                         # rebuild the cluster index now
+kubectl palette use payments-prod --refresh  # fetch the kubeconfig again (also: exec --refresh), e.g. after the endpoint or CA changed
 kubectl palette logout                       # removes the session, the index, admin files
 ```
 
 Headless host: add `--no-browser` and forward port 8000 with `ssh -L 8000:localhost:8000`.
-Cluster files are written to `~/.kube/palette/<project>/<cluster>.yaml` (mode 600) and hold
+Cluster files are written to `~/.kube/palette/<project>/<cluster>.yaml` (mode 600; admin files go to `<project>/.admin/<cluster>.yaml`) and hold
 no token or secret. `~/.kube/config` is never touched.
 
 ## Develop

@@ -262,7 +262,7 @@ func TestAdminGate(t *testing.T) {
 	if code != 0 {
 		t.Fatal(e)
 	}
-	path := filepath.Join(h.a.Paths.KubeDir, "Default", "alpha.admin.yaml")
+	path := filepath.Join(h.a.Paths.KubeDir, "Default", ".admin", "alpha.yaml")
 	fi, err := os.Stat(path)
 	if err != nil || fi.Mode().Perm() != 0o600 || !strings.Contains(out, path) {
 		t.Fatalf("%v %v %q", fi, err, out)

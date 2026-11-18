@@ -8,12 +8,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/craig-ai-tooling/kubectl-palette/internal/picker"
 	"github.com/craig-ai-tooling/kubectl-palette/internal/session"
 	"github.com/craig-ai-tooling/kubectl-palette/internal/shell"
+	"golang.org/x/term"
 )
 
 // App holds everything a command touches, so tests can swap it.
@@ -63,8 +66,8 @@ const usage = `usage: kubectl palette <command>
 
 commands:
   login        log in through the browser (--from-kubeconfig <file> the first time)
-  use          target a cluster in this terminal: use [name] [--admin] [--no-fuzzy]
-  exec         run kubectl against a cluster once: exec <name> [--admin] -- <args>
+  use          target a cluster in this terminal: use [name] [--admin] [--no-fuzzy] [--refresh]
+  exec         run kubectl against a cluster once: exec <name> [--admin] [--refresh] -- <args>
   current      show the cluster and mode for this terminal
   sync         rebuild the local cluster index
   logout       delete the session, the index and admin kubeconfigs
@@ -321,6 +324,8 @@ func (a *App) login(ctx context.Context, args []string) error {
 	if err != nil && !errors.Is(err, config.ErrNoConfig) {
 		return err
 	}
+	oldIssuer := cfg.Issuer
+	apiExplicit := *apiURL != ""
 	if *bootstrap != "" {
 		b, err := os.ReadFile(*bootstrap)
 		if err != nil {
@@ -333,6 +338,7 @@ func (a *App) login(ctx context.Context, args []string) error {
 		}
 		j.Issuer, j.ClientID, j.ClientSecret, j.API = raw["issuer"], raw["client_id"], raw["client_secret"], raw["api"]
 		cfg.Issuer, cfg.ClientID, cfg.ClientSecret, cfg.APIURL = j.Issuer, j.ClientID, j.ClientSecret, j.API
+		apiExplicit = apiExplicit || j.API != ""
 	}
 	if *fromKC != "" {
 		b, err := os.ReadFile(*fromKC)
@@ -354,6 +360,12 @@ func (a *App) login(ctx context.Context, args []string) error {
 		if f.v != "" {
 			*f.dst = f.v
 		}
+	}
+	// A different issuer is a different Palette installation. Keeping the saved API URL would
+	// send the new refresh token to the old one, so derive it again.
+	issuerChanged := oldIssuer != "" && cfg.Issuer != oldIssuer
+	if issuerChanged && !apiExplicit {
+		cfg.APIURL = deriveAPIURL(cfg.Issuer)
 	}
 	if cfg.APIURL == "" {
 		cfg.APIURL = deriveAPIURL(cfg.Issuer)
@@ -384,6 +396,12 @@ func (a *App) login(ctx context.Context, args []string) error {
 			return err
 		}
 	}
+	if issuerChanged {
+		if err := a.wipeState(m); err != nil {
+			return fmt.Errorf("issuer changed from %s to %s and the old state could not be removed, nothing was saved: %w", oldIssuer, cfg.Issuer, err)
+		}
+		fmt.Fprintf(a.Stderr, "issuer changed: removed the old session, index and cached kubeconfigs\n")
+	}
 	if err := a.Paths.Save(cfg); err != nil {
 		return err
 	}
@@ -398,13 +416,26 @@ func (a *App) login(ctx context.Context, args []string) error {
 	fmt.Fprintf(a.Stderr, "logged in; indexed %d clusters in %.1fs\n", len(idx.Clusters), a.now().Sub(start).Seconds())
 	if len(idx.Clusters) == 1 {
 		c := idx.Clusters[0]
-		if _, _, err := a.ensureKubeconfig(ctx, c, false); err != nil {
+		if _, _, err := a.ensureKubeconfig(ctx, c, false, false); err != nil {
 			fmt.Fprintf(a.Stderr, "one cluster found (%s) but its kubeconfig could not be prepared: %v\n", c.Ref(), err)
 			return nil
 		}
 		fmt.Fprintf(a.Stderr, "one cluster found and selected: %s. Run: kubectl palette use\n", c.Ref())
 	}
 	return nil
+}
+
+// wipeState removes everything tied to the previous installation: session, index and every
+// cached cluster file, OIDC and admin.
+func (a *App) wipeState(m *session.Manager) error {
+	errs := []error{m.Delete()}
+	for _, p := range []string{a.Paths.IndexFile(), a.Paths.IndexLock()} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
+	}
+	_, cerrs := a.clearClusterFiles(false)
+	return errors.Join(append(errs, cerrs...)...)
 }
 
 func deriveAPIURL(issuer string) string {
@@ -454,17 +485,30 @@ func importKubeloginCache(dir string) (session.Session, error) {
 
 func (a *App) shouldPrintEnv(flagPrint bool) bool { return flagPrint || !a.StdoutIsTTY }
 
-// ensureKubeconfig returns the path of the cluster's kubeconfig, fetching it once if absent.
-func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin bool) (path string, fetched bool, err error) {
+// ensureKubeconfig returns the path of the cluster's kubeconfig, fetching it when absent.
+// A cached file is trusted only if its UID sidecar matches the index entry, so a cluster
+// rebuilt under the same name, or a file from an older layout, is fetched again. refresh
+// forces a fetch. An admin file is never returned once the permission is gone.
+func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin, refresh bool) (path string, fetched bool, err error) {
 	path, err = a.Paths.ClusterFile(c.Project, c.Name, admin)
 	if err != nil {
 		return "", false, err
 	}
-	if _, serr := os.Stat(path); serr == nil {
-		return path, false, nil
-	}
 	if admin && !c.CanAdmin() {
+		if rerr := config.RemoveCluster(path); rerr != nil {
+			return "", false, fmt.Errorf("you no longer hold %s on %s and the cached admin kubeconfig could not be removed: %w", index.AdminPermission, c.Ref(), rerr)
+		}
 		return "", false, fmt.Errorf("you do not hold %s on %s", index.AdminPermission, c.Ref())
+	}
+	if _, serr := os.Stat(path); serr == nil {
+		if !refresh && c.UID != "" && config.CachedUID(path) == c.UID {
+			return path, false, nil
+		}
+		// Stale, foreign or legacy: drop it before fetching so a failed fetch cannot
+		// leave the wrong cluster's file behind.
+		if rerr := config.RemoveCluster(path); rerr != nil {
+			return "", false, fmt.Errorf("remove stale kubeconfig for %s: %w", c.Ref(), rerr)
+		}
 	}
 	cl, err := a.apiClient()
 	if err != nil {
@@ -505,6 +549,10 @@ func (a *App) ensureKubeconfig(ctx context.Context, c index.Cluster, admin bool)
 	if err := config.WriteFileAtomic(path, raw); err != nil {
 		return "", false, err
 	}
+	if err := config.WriteCachedUID(path, c.UID); err != nil {
+		_ = config.RemoveCluster(path)
+		return "", false, err
+	}
 	return path, true, nil
 }
 
@@ -523,12 +571,13 @@ func (a *App) use(ctx context.Context, args []string) error {
 	admin := fs.Bool("admin", false, "use the admin kubeconfig (needs the download permission)")
 	printEnv := fs.Bool("print-env", false, "print an export line for the shell hook")
 	noFuzzy := fs.Bool("no-fuzzy", false, "with no name, use a numbered list instead of the fuzzy finder")
+	refresh := fs.Bool("refresh", false, "fetch the kubeconfig again instead of using the cached file")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return exitError(2)
 	}
 	if len(pos) > 1 {
-		return errors.New("usage: kubectl palette use [name] [--admin]")
+		return errors.New("usage: kubectl palette use [name] [--admin] [--refresh]")
 	}
 	idx, fresh, err := a.loadOrBuildIndex(ctx)
 	if err != nil {
@@ -546,7 +595,7 @@ func (a *App) use(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	path, fetched, err := a.ensureKubeconfig(ctx, c, *admin)
+	path, fetched, err := a.ensureKubeconfig(ctx, c, *admin, *refresh)
 	if err != nil {
 		return err
 	}
@@ -632,8 +681,8 @@ func (a *App) pickNumbered(idx *index.Index) (index.Cluster, error) {
 	if _, err := fmt.Fscanln(a.Stdin, &in); err != nil {
 		return index.Cluster{}, errors.New("no cluster chosen")
 	}
-	var n int
-	if _, err := fmt.Sscanf(in, "%d", &n); err == nil && n >= 1 && n <= len(idx.Clusters) {
+	// The whole input must be a number: "2-prod" is a name, not row 2.
+	if n, err := strconv.Atoi(in); err == nil && n >= 1 && n <= len(idx.Clusters) {
 		return idx.Clusters[n-1], nil
 	}
 	return idx.Resolve(in)
@@ -666,12 +715,13 @@ func (a *App) execCmd(ctx context.Context, args []string) int {
 	}
 	fs := newFlags("exec", a.Stderr)
 	admin := fs.Bool("admin", false, "use the admin kubeconfig")
+	refresh := fs.Bool("refresh", false, "fetch the kubeconfig again instead of using the cached file")
 	pos, err := parseFlags(fs, before)
 	if err != nil {
 		return 2
 	}
 	if len(pos) != 1 || !split || len(kargs) == 0 {
-		fmt.Fprintln(a.Stderr, "usage: kubectl palette exec <name> [--admin] -- <kubectl args>")
+		fmt.Fprintln(a.Stderr, "usage: kubectl palette exec <name> [--admin] [--refresh] -- <kubectl args>")
 		return 2
 	}
 	run := func() (int, error) {
@@ -683,7 +733,7 @@ func (a *App) execCmd(ctx context.Context, args []string) int {
 		if err != nil {
 			return 0, err
 		}
-		path, _, err := a.ensureKubeconfig(ctx, c, *admin)
+		path, _, err := a.ensureKubeconfig(ctx, c, *admin, *refresh)
 		if err != nil {
 			return 0, err
 		}
@@ -712,8 +762,9 @@ func (a *App) current() error {
 	dir, file := filepath.Split(rel)
 	mode := "oidc"
 	name := strings.TrimSuffix(file, ".yaml")
-	if strings.HasSuffix(name, ".admin") {
-		mode, name = "admin", strings.TrimSuffix(name, ".admin")
+	if filepath.Base(filepath.Clean(dir)) == config.AdminDir {
+		mode = "admin"
+		dir = filepath.Dir(filepath.Clean(dir)) + string(filepath.Separator)
 	}
 	fmt.Fprintf(a.Stdout, "%s%s (%s)\n", dir, name, mode)
 	return nil
@@ -729,22 +780,74 @@ func (a *App) logout() error {
 			errs = append(errs, err)
 		}
 	}
-	removed := 0
-	_ = filepath.WalkDir(a.Paths.KubeDir, func(p string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".admin.yaml") {
-			if rerr := os.Remove(p); rerr != nil {
-				errs = append(errs, rerr)
-			} else {
-				removed++
-			}
-		}
-		return nil
-	})
+	removed, cerrs := a.clearClusterFiles(true)
+	errs = append(errs, cerrs...)
 	if len(errs) > 0 {
-		return errors.Join(errs...)
+		fmt.Fprintln(a.Stderr, "logout incomplete, these could not be removed:")
+		for _, e := range errs {
+			fmt.Fprintf(a.Stderr, "  %v\n", e)
+		}
+		return exitError(1)
 	}
 	fmt.Fprintf(a.Stderr, "logged out; removed the session, the index and %d admin kubeconfig(s)\n", removed)
 	return nil
+}
+
+// clearClusterFiles removes cached cluster files under the kube directory and reports every
+// path it could not read or remove. Admin files always go, including the flat
+// <cluster>.admin.yaml files an older layout left in the project directory. With adminOnly
+// false the OIDC files and their UID sidecars go too. It never stops at the first error:
+// credentials left behind must be named.
+func (a *App) clearClusterFiles(adminOnly bool) (admin int, errs []error) {
+	projects, err := os.ReadDir(a.Paths.KubeDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, []error{err}
+	}
+	for _, pd := range projects {
+		if !pd.IsDir() {
+			continue
+		}
+		dir := filepath.Join(a.Paths.KubeDir, pd.Name())
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, e := range ents {
+			p := filepath.Join(dir, e.Name())
+			switch {
+			case e.IsDir() && e.Name() == config.AdminDir:
+				files, rerr := os.ReadDir(p)
+				if rerr != nil {
+					errs = append(errs, rerr)
+					continue
+				}
+				for _, f := range files {
+					if strings.HasSuffix(f.Name(), ".yaml") {
+						admin++
+					}
+				}
+				if rerr := os.RemoveAll(p); rerr != nil {
+					errs = append(errs, rerr)
+				}
+			case e.IsDir():
+			case strings.HasSuffix(e.Name(), ".admin.yaml") || strings.HasSuffix(e.Name(), ".admin.yaml"+config.UIDSuffix):
+				if rerr := os.Remove(p); rerr != nil {
+					errs = append(errs, rerr)
+				} else if strings.HasSuffix(e.Name(), ".yaml") {
+					admin++
+				}
+			case !adminOnly && (strings.HasSuffix(e.Name(), ".yaml") || strings.HasSuffix(e.Name(), ".yaml"+config.UIDSuffix)):
+				if rerr := os.Remove(p); rerr != nil {
+					errs = append(errs, rerr)
+				}
+			}
+		}
+	}
+	return admin, errs
 }
 
 func (a *App) shellInit(args []string) error {
@@ -802,20 +905,31 @@ func RunKubectlDefault(env []string, args []string) int {
 	return 0
 }
 
-// SpawnShellDefault starts $SHELL with KUBECONFIG set.
+// SpawnShellDefault starts the user's shell with KUBECONFIG set.
 func SpawnShellDefault(kubeconfigPath string) error {
-	sh := os.Getenv("SHELL")
-	if sh == "" {
-		sh = "/bin/sh"
-	}
-	cmd := exec.Command(sh)
+	cmd := exec.Command(shellFor(runtime.GOOS, os.Getenv))
 	cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeconfigPath)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
 }
 
-// IsTTY reports whether f is a terminal.
+// shellFor picks the interactive shell. $SHELL wins everywhere (Git Bash sets it on
+// Windows). Without it Windows has no /bin/sh, so fall back to COMSPEC, then PowerShell.
+func shellFor(goos string, getenv func(string) string) string {
+	if sh := getenv("SHELL"); sh != "" {
+		return sh
+	}
+	if goos == "windows" {
+		if cs := getenv("COMSPEC"); cs != "" {
+			return cs
+		}
+		return "powershell.exe"
+	}
+	return "/bin/sh"
+}
+
+// IsTTY reports whether f is a terminal. A character-device check is not enough: it also
+// accepts /dev/null.
 func IsTTY(f *os.File) bool {
-	fi, err := f.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(f.Fd()))
 }
