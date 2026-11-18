@@ -85,16 +85,52 @@ Rules that follow from the table:
 - Group claims are required: platform teams bind RBAC to groups in the cluster profile.
 - Headless hosts need `ssh -L 8000:localhost:8000` until Palette offers a device-code flow.
 
+## Login test results (11/18/26)
+
+Run with `hack/kubelogin-probe.py` and `hack/token-followup.py` against a SaaS tenant,
+using kubelogin v1.36.4 and one browser login.
+
+- The login returns an ID token (60 minute lifetime) and a refresh token (4 hours).
+- The ID token carries `groups`, populated with the user's Palette teams, with only the
+  `openid profile email` scopes requested. No `groups` scope is needed.
+- One ID token authenticated to 7 of 8 OIDC clusters in the tenant (4 direct, 3 through
+  the Spectro proxy). Each cluster's SelfSubjectReview returned the user's email as the
+  username and the Palette teams as groups. The eighth failed on a TLS hostname mismatch
+  at its proxy endpoint before any auth took place.
+- Silent refresh works: `--force-refresh` returned a new ID token in 0.6 s with no
+  browser, and a new refresh token with a fresh 4 hour expiry. The session slides for
+  as long as it is used at least once every 4 hours.
+- A kubelogin call with a valid cached token takes 6 ms.
+- The Palette API rejects the ID token (401, raw and Bearer).
+- The Palette API accepts the refresh token as a raw `Authorization` header. With it,
+  `/v1/users/me`, the cluster metadata index (2.1 s) and `kubeconfigclient` (0.8 s) all
+  returned 200. One browser login therefore covers the cluster index, kubeconfig
+  fetches and cluster access, with no API key.
+- The refresh token is a Palette-signed JWT with the same session claim as the ID token.
+  Using it as an API session works today but is undocumented. See "Ask to engineering".
+- A hand-rolled authorization-code exchange (`hack/oidc-probe.py`) was rejected with
+  "session not found" for a freshly issued code. kubelogin's exchange succeeds. The only
+  visible difference in the auth request is kubelogin's `access_type=offline`. Cause not
+  confirmed; the plugin uses the same Go oauth2 library as kubelogin.
+
+## Ask to engineering
+
+1. Bless an API path for OIDC logins: either accept the ID token on the Palette API or
+   document the refresh token as a session token. The prototype depends on behavior that
+   is not documented.
+2. Add a device-code flow for headless hosts.
+3. Confirm the metadata index stays a single fast call at 1,000 or more clusters, or
+   add a lightweight name and uid listing.
+4. Ship the plugin with Palette (served from the console, as Tanzu serves its plugin).
+
 ## Open
 
-1. Does the Palette API accept the OIDC login token as `Authorization`? If yes, one
-   browser login covers both the cluster index and cluster access. If no, the prototype
-   uses an API key for the index and the gap becomes the request to engineering.
-   Test: `hack/oidc-probe.py`.
-2. Does the token carry groups (Palette teams), by default or with a `groups` scope?
-3. Is a refresh token issued (`offline_access`), and how long does the ID token live?
-4. Does the metadata call stay a single fast call at 1,000 clusters? Seen at 131 only.
-5. Self-hosted Palette and VerteX: issuer host, private CA trust, no `--insecure`.
+1. Does the metadata call stay a single fast call at 1,000 clusters? Seen at 131 only.
+2. Self-hosted Palette and VerteX: issuer host, private CA trust, no `--insecure`.
+3. Clusters on a customer's own IdP instead of Palette as IdP: cluster access works
+   through that IdP, but the API session above does not exist, so the index needs an
+   API key.
+4. Refresh-token behavior after 4 hours idle, and with tenant SSO or MFA enforced.
 
 ## Prior art
 
