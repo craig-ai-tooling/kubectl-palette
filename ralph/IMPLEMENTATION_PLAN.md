@@ -33,4 +33,4 @@ the `Authorization` header; the ID token is for clusters only.
 
 Things deliberately NOT being done, so no iteration wanders into them.
 
-- A UI, a daemon, or any write to `~/.kube/config`.
+- A UI, a daemon, or any write to `~/.kube/config` other than the contexts described in `docs/design.md`.

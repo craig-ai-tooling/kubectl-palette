@@ -1,12 +1,14 @@
 # kubectl-palette
 
 A kubectl plugin for Spectro Cloud Palette. Log in once in a browser, name a cluster,
-and plain `kubectl` in that terminal runs against it. No kube contexts to manage.
+and plain `kubectl` in that terminal runs against it. Every cluster you reach also becomes
+a context in your kubeconfig, so `kubectl --context <name>` works in any terminal.
 
-Status: prototype. Every command in the plan works against a live tenant: `login`, `token`,
-`sync`, `use` (with `--admin` and a fuzzy picker), `exec`, `current`, `logout`, `shell-init`,
-and tab completion of cluster names. Releases are built by goreleaser and install through krew. See [`docs/design.md`](docs/design.md) for the design and
-the open questions.
+Status: prototype. The commands are `login`, `token`, `sync`, `use` (with `--admin` and a
+fuzzy picker), `exec`, `contexts`, `current`, `logout`, `shell-init`, and tab completion of
+cluster names. Releases are built by goreleaser and install through krew. See
+[`docs/design.md`](docs/design.md) for the design, what was checked against a live tenant
+and what was not.
 
 ## Install
 
@@ -27,8 +29,9 @@ and put `kubectl-palette` on your PATH.
 go build -o ~/bin/kubectl-palette ./cmd/kubectl-palette
 ```
 
-`krew uninstall palette` leaves the completion link described below; remove
-`kubectl_complete-palette` from krew's bin directory by hand.
+`kubectl krew uninstall palette` leaves two things behind: the `kubectl_complete-palette`
+link in krew's bin directory and the contexts in `~/.kube/config`. Run
+`kubectl palette logout --all` before uninstalling, then remove the link by hand.
 
 ### Cutting a release
 
@@ -47,10 +50,12 @@ kubectl krew install --manifest=dist/palette.yaml --archive="dist/kubectl-palett
 ## Quick start
 
 Log in once with the Palette server and your tenant (org) name. Nothing else is needed.
-If the server URL already identifies one tenant, `--tenant` can be left out.
+If the server URL already identifies one tenant, `--tenant` can be left out. The client
+secret is optional.
 
 ```
-kubectl palette login --server https://palette.example.com --tenant acme
+kubectl palette login --server <url> --tenant <org>
+kubectl palette login --server https://palette.example.com --tenant acme    # for example
 ```
 
 If the server does not publish the tenant UID for your org, the login says so. Pass the
@@ -107,12 +112,90 @@ kubectl palette exec payments-prod -- get pods
 kubectl palette current
 kubectl palette sync                         # rebuild the cluster index now
 kubectl palette use payments-prod --refresh  # fetch the kubeconfig again (also: exec --refresh), e.g. after the endpoint or CA changed
-kubectl palette logout                       # removes the selected tenant's session, index, admin files
+kubectl palette logout                       # removes the selected tenant's session, index, admin files, contexts
 ```
 
-Headless host: add `--no-browser` and forward port 8000 with `ssh -L 8000:localhost:8000`.
-Cluster files of the default tenant are written to `~/.kube/palette/<project>/<cluster>.yaml` (mode 600; admin files go to `<project>/.admin/<cluster>.yaml`) and hold
-no token or secret. `~/.kube/config` is never touched.
+Cluster files of the default tenant are written to `~/.kube/palette/<project>/<cluster>.yaml`
+(mode 600; admin files go to `<project>/.admin/<cluster>.yaml`) and hold no token or secret.
+
+## Contexts
+
+Every cluster you reach through OIDC also becomes a context in your normal kubeconfig
+(`~/.kube/config`). `kubectl config get-contexts`, `kubectl config use-context <name>` and
+`kubectl --context <name>` then work in any terminal, later, without running the plugin
+yourself.
+
+What is written, per cluster: one cluster entry and one context, both named after the
+cluster (`cluster`, then `project/cluster`, then `<tenant>/project/cluster` when a name is
+taken). One user entry per tenant entry runs `kubectl-palette token`, with `--tenant <name>`
+for a named tenant. No token, client secret or certificate is written. Admin credentials
+are never written there: `use --admin` and `exec --admin` add no context. The plugin
+records what it created in `~/.config/kubectl-palette/contexts.json`, never touches an entry
+that is not in that list, and never changes `current-context`.
+
+When contexts are added:
+
+- `login` adds every cluster of a tenant that has 25 or fewer. A larger tenant adds
+  contexts as you use clusters, or all at once with `contexts add --all`.
+- `use` and `exec` add the cluster they use, once. A second `use` writes nothing.
+- The first time a context is added the plugin prints `added context <name> to <file>`.
+
+```
+kubectl palette contexts                      # context, tenant, project/cluster
+kubectl palette contexts add web api          # by name, as for use
+kubectl palette contexts add --all            # every cluster of the selected tenant
+kubectl palette contexts remove web           # by context name
+kubectl palette contexts remove --all         # the selected tenant (--all-tenants: every tenant)
+kubectl palette contexts prune                # drop clusters Palette no longer lists
+kubectl --context web get pods                # any terminal, no plugin command needed
+```
+
+`use` still pins one terminal. It points `KUBECONFIG` at that cluster's own file, so
+that terminal cannot drift to another cluster. The contexts serve every other terminal.
+`kubectl palette use --unset` puts a pinned terminal back on your own kubeconfig.
+
+`logout` removes the tenant's contexts. `logout --keep-contexts` leaves them and
+`logout --all` removes every one. A session that merely expires leaves them in place.
+
+Turn contexts off with `KUBECTL_PALETTE_NO_CONTEXTS=1`, or per call with `login --no-contexts`,
+`use --no-context` and `exec --no-context`. `KUBECTL_PALETTE_CONTEXT_FILE` writes them to
+another file. With `KUBECTL_PALETTE_KUBEDIR` set and no context file named, they go to
+`<kubedir>/contexts.yaml`, so a redirected setup never touches `~/.kube/config`.
+
+A context keeps working while the login session does. Each `kubectl --context` call runs
+`kubectl-palette token`, which needs the plugin on PATH and a valid session. With Palette
+as the identity provider a token lasts up to 60 minutes, and renewing it needs Palette.
+Contexts remove the need to look clusters up in Palette. They do not remove the need for
+Palette to issue tokens. When the session is gone, run `kubectl palette login`.
+
+## No browser
+
+On a machine with no browser, `login` skips opening one. That happens with `--no-browser`,
+in an ssh session (`SSH_CONNECTION` or `SSH_TTY`), and on Linux with no `DISPLAY` or
+`WAYLAND_DISPLAY`. It prints the login URL. Two ways to finish:
+
+- Open the URL in a browser on any machine. The browser ends on a `localhost` address that
+  fails to load. Copy that address from the address bar and paste it into the terminal where
+  `login` is waiting.
+- Or forward the login port from your own machine and open the URL there:
+  `ssh -L 8000:localhost:8000 <this host>`. Use the port shown in the URL's `redirect_uri`.
+
+Paste-back works whenever stdin is a terminal, also when a browser was opened.
+
+## Virtual clusters
+
+A virtual cluster is marked `virtual on <host>` in the picker, in the numbered list and in
+the picker's detail pane, or just `virtual` when its host is not in your index. To work
+with the virtual clusters of one host cluster:
+
+```
+kubectl palette use --host <host cluster>            # picker limited to that host's virtual clusters
+kubectl palette use web-vc --host <host cluster>     # name resolution limited the same way
+kubectl palette contexts add --all --host <host cluster>
+```
+
+A host with no virtual clusters is an error. Virtual clusters with OIDC are not verified
+against a live tenant.
 
 ## Develop
 

@@ -12,7 +12,10 @@ file paths.
 ### 1. Credentials stay out of kubeconfigs
 - Never write a token or secret into a kubeconfig file. The OIDC kubeconfig points at
   `kubectl-palette token` as an exec credential plugin and holds no token.
-- Never read or write `~/.kube/config`. Per-terminal files live under `~/.kube/palette/`.
+- `kubeconfig.Rewrite` takes a `RewriteOptions` struct, so a secret can never be passed
+  where the tenant goes.
+- Per-terminal files live under `~/.kube/palette/`. The user's own kubeconfig is touched
+  only through `internal/kubectx` (rule 3b), never by any other code path.
 
 ### 2. File modes
 - The token cache and any admin kubeconfig are mode 600, under the user's home.
@@ -54,6 +57,33 @@ file paths.
   server host, the root domain or a subdomain of the root domain, else the login stops.
 - Logout of a named entry removes its whole directory, including the config, and clears
   `<Home>/active` if it pointed there.
+
+### 3b. The context file
+`internal/kubectx` adds contexts to the user's kubeconfig (`~/.kube/config` by default).
+It is the only code that writes there.
+
+- Only exec-credential users are written. It refuses a source whose user has a client
+  certificate or key, a token or token file, a username or password, an auth provider or
+  impersonation. Admin kubeconfigs therefore can never land in the file, and the cli
+  never even reads an admin file for this.
+- The exec block must run exactly `kubectl-palette` (no path), with no env, and args
+  `token` or `token --tenant <name>` and nothing else. A source with any other argument is
+  refused. The tenant named in the args must equal the entry the cluster belongs to.
+- The plugin records what it created in `<Home>/contexts.json`. It never changes or removes
+  a cluster, context or user that is not in that registry. A context the user re-pointed is
+  left alone on removal and only dropped from the registry. A user entry that is not a
+  plain `kubectl-palette token` exec user is never overwritten or removed.
+- `current-context` is never set. It is cleared only when the context it names is removed.
+- A kubeconfig that does not parse is never overwritten. The command warns and carries on.
+- Every change holds a lock on the registry, loads the file, edits in memory and writes
+  the registry and the kubeconfig through a mode-600 temp file and a rename. A symlinked
+  kubeconfig is written through to its target.
+- A failure to record never fails the command that triggered it.
+- `token --tenant <name>` is what pins a context to its tenant. A context from tenant A
+  cannot ask for tenant B's token, and plain `token` is always the default entry.
+- `KUBECTL_PALETTE_NO_CONTEXTS=1` turns it all off. Tests must keep the context file in
+  `t.TempDir()`: a `Paths` with no context file disables the feature, and the cli tests
+  run with `HOME` in a throwaway directory and fail if anything appears under it.
 
 ### 4. Never log secrets
 - Never log tokens, client secrets or API keys, at any log level.
@@ -99,7 +129,7 @@ func safeJoin(base, name string) (string, error) {
 
 - [ ] No secret added to the repo
 - [ ] No token or secret written to a kubeconfig
-- [ ] `~/.kube/config` is not read or written
+- [ ] `~/.kube/config` is written only through `internal/kubectx`, only exec-credential users, and never in admin mode
 - [ ] New files holding credentials are mode 600
 - [ ] No token, client secret or API key reaches a log or error message
 - [ ] No TLS verification bypass added
