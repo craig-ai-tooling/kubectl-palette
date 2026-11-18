@@ -106,6 +106,19 @@ func TestUpsertDoesNotOverwriteRepointedContext(t *testing.T) {
 			t.Fatalf("stale=%v reused the re-pointed name", stale)
 		}
 		got := e.load()
+		// The replacement must be a real, named context that points at the new cluster.
+		if b.Context == "" {
+			t.Fatalf("stale=%v replacement context has no name", stale)
+		}
+		if _, bad := got.Contexts[""]; bad {
+			t.Fatalf("stale=%v wrote a context under the empty name", stale)
+		}
+		if _, bad := got.Clusters[""]; bad {
+			t.Fatalf("stale=%v wrote a cluster under the empty name", stale)
+		}
+		if c := got.Contexts[b.Context]; c == nil || c.Cluster != b.Context || got.Clusters[b.Context] == nil || got.Clusters[b.Context].Server != "https://b.example.test" {
+			t.Fatalf("stale=%v replacement context %q is not usable: %+v", stale, b.Context, c)
+		}
 		if c := got.Contexts[a.Context]; c == nil || c.Cluster != "mine" || c.AuthInfo != "mine" || c.Namespace != "x" {
 			t.Fatalf("user's context changed: %+v", c)
 		}

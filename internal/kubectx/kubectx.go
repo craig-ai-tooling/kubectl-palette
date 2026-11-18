@@ -535,6 +535,10 @@ func upsertOne(cfg *api.Config, recs []Record, e Entry, source []byte, now time.
 			rec.Context = pickContext(cfg, recs, e)
 		}
 	}
+	if rec.Context == "" {
+		// The old name is no longer ours (the user re-pointed it). Take a fresh free one.
+		rec.Context = pickContext(cfg, recs, e)
+	}
 	// The record's old user is not claimed by "another" record: it is ours being replaced.
 	rec.User = pickUser(cfg, recs, e.Tenant, e.IssuerID)
 

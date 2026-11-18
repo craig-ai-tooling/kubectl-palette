@@ -240,17 +240,20 @@ func TestAvailableComparesServerAndOrg(t *testing.T) {
 	srv := tenantServer(t, "acme", uidAcme, "acme-web")
 	cfg := h.namedCfg("acme")
 	cfg.APIURL, cfg.Server = srv.URL, srv.URL
+	cfg.Issuer = srv.URL + "/v1/oidc/tenant/" + uidAcme
 	h.addEntry(t, "acme", cfg, "rt-acme", "acme")
 	h.a.Paths.SetActive("acme")
-	// globex exists, but on another server.
+	// globex exists, but on another server (another issuer host).
 	h.addEntry(t, "globex", h.namedCfg("globex"), "rt-0", "globex")
 	_, out, _ := h.run("tenants", "--available")
 	if !strings.Contains(out, "--tenant globex") {
 		t.Fatalf("globex on this server is hidden:\n%s", out)
 	}
 	// An entry on the same server still hides it.
+	// It was logged in through its own org host, so only the issuer host matches.
 	g := h.namedCfg("globex")
-	g.Server = srv.URL
+	g.Server = "https://globex.palette.example.com"
+	g.Issuer = srv.URL + "/v1/oidc/tenant/" + uidGlobex
 	h.addEntry(t, "globex", g, "rt-0", "globex")
 	_, out, _ = h.run("tenants", "--available")
 	if strings.Contains(out, "--tenant globex") {
@@ -281,5 +284,25 @@ func writeKube(t *testing.T, h *harness, cfg *api.Config) {
 	t.Helper()
 	if err := clientcmd.WriteToFile(*cfg, ctxFileOf(t, h)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// With an issuer pin, token prints nothing unless the entry's config can be read.
+func TestTokenWithPinFailsClosedOnUnreadableConfig(t *testing.T) {
+	h := newHarness(t, time.Now().Add(time.Hour))
+	cfg, err := h.a.Paths.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := config.IssuerID(cfg.Issuer)
+	if code, out, _ := h.run("token", "--issuer-id", id); code != 0 || !strings.Contains(out, "ExecCredential") {
+		t.Fatalf("valid pin refused: %d %s", code, out)
+	}
+	if err := os.WriteFile(h.a.Paths.ConfigFile(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := h.run("token", "--issuer-id", id)
+	if code == 0 || strings.Contains(out, "ExecCredential") {
+		t.Fatalf("token printed with an unreadable config: %d %s", code, out)
 	}
 }

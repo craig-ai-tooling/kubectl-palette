@@ -272,8 +272,15 @@ func (a *App) token(ctx context.Context, args []string) error {
 	}
 	a.Paths = a.Paths.ForTenant(*tenant)
 	if *issuerID != "" {
-		// A missing config falls through to the login hint below.
-		if cfg, err := a.Paths.Load(); err == nil && config.IssuerID(cfg.Issuer) != *issuerID {
+		// Fail closed: with a pin, no token is printed unless the entry's config was read
+		// and names the same login.
+		cfg, err := a.Paths.Load()
+		switch {
+		case errors.Is(err, config.ErrNoConfig):
+			return errors.New("run: " + a.loginHint())
+		case err != nil:
+			return err
+		case config.IssuerID(cfg.Issuer) != *issuerID:
 			return issuerMismatchErr(a.Paths.Entry())
 		}
 	}

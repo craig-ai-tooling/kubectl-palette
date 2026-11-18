@@ -240,7 +240,9 @@ func (a *App) tenants(ctx context.Context, args []string) error {
 	// on another Palette installation.
 	have := map[string]bool{}
 	for _, r := range rows {
-		if serverHost(r.cfg) == serverHost(cfg) {
+		// Compare the issuer host: entries logged in through different org hosts of one
+		// installation share it, while --server keeps the host that was typed.
+		if issuerHost(r.cfg.Issuer) == issuerHost(cfg.Issuer) {
 			have[r.name], have[r.cfg.Org] = true, true
 		}
 	}
