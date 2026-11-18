@@ -14,22 +14,35 @@ import (
 const DirectiveNoFileComp = 4
 
 // Commands are the subcommands offered at the first word. Hidden ones are left out.
-var Commands = []string{"login", "tenants", "tenant", "use", "exec", "current", "sync", "logout", "token", "shell-init", "completion", "version"}
+var Commands = []string{"login", "tenants", "tenant", "use", "exec", "contexts", "current", "sync", "logout", "token", "shell-init", "completion", "version"}
 
 // flags lists the flags completed after a command name.
 var flags = map[string][]string{
-	"use":     {"--admin", "--no-fuzzy", "--refresh", "--tenant"},
-	"exec":    {"--admin", "--refresh", "--tenant"},
+	"use":     {"--admin", "--host", "--no-context", "--no-fuzzy", "--refresh", "--tenant", "--unset"},
+	"exec":    {"--admin", "--no-context", "--refresh", "--tenant"},
 	"sync":    {"--tenant"},
-	"logout":  {"--all", "--tenant"},
+	"logout":  {"--all", "--keep-contexts", "--tenant"},
 	"token":   {"--tenant"},
 	"tenants": {"--available"},
 	"login": {"--server", "--tenant", "--name", "--ca-file", "--from-kubeconfig", "--issuer", "--client-id",
-		"--client-secret", "--api-url", "--no-browser"},
+		"--client-secret", "--api-url", "--no-browser", "--no-contexts"},
 }
 
-// tenantFlag is the flag whose value is a tenant entry name.
-const tenantFlag = "--tenant"
+// tenantFlag is the flag whose value is a tenant entry name. hostFlag's value is a cluster.
+const (
+	tenantFlag = "--tenant"
+	hostFlag   = "--host"
+)
+
+// contextSubs are the words after `contexts`, and the flags each one takes.
+var contextSubs = []string{"list", "add", "remove", "prune"}
+
+var contextFlags = map[string][]string{
+	"list":   nil,
+	"add":    {"--all", "--host", "--tenant"},
+	"remove": {"--all", "--all-tenants", "--tenant"},
+	"prune":  {"--tenant"},
+}
 
 // Complete returns the candidates for the last word in words. words are the arguments
 // typed after the plugin name, ending with the word under the cursor (possibly empty).
@@ -41,6 +54,12 @@ func Complete(idx *index.Index, words []string) []string {
 // CompleteWith is Complete plus the saved tenant entry names, offered after --tenant and
 // for `tenant <TAB>`.
 func CompleteWith(idx *index.Index, entries []string, words []string) []string {
+	return CompleteAll(idx, entries, nil, words)
+}
+
+// CompleteAll is CompleteWith plus the names of the recorded contexts, offered for
+// `contexts remove <TAB>`.
+func CompleteAll(idx *index.Index, entries, contexts []string, words []string) []string {
 	if len(words) == 0 {
 		return filter(Commands, "")
 	}
@@ -49,7 +68,7 @@ func CompleteWith(idx *index.Index, entries []string, words []string) []string {
 		return filter(Commands, cur)
 	}
 	cmd, prior := words[0], words[1:len(words)-1]
-	if _, ok := flags[cmd]; ok || cmd == "tenant" {
+	if _, ok := flags[cmd]; ok || cmd == "tenant" || cmd == "contexts" {
 		if v, ok := strings.CutPrefix(cur, tenantFlag+"="); ok {
 			var out []string
 			for _, e := range filter(entries, v) {
@@ -61,7 +80,21 @@ func CompleteWith(idx *index.Index, entries []string, words []string) []string {
 			return filter(entries, cur)
 		}
 	}
+	if cmd == "use" || cmd == "contexts" {
+		if v, ok := strings.CutPrefix(cur, hostFlag+"="); ok {
+			var out []string
+			for _, c := range Clusters(idx, v) {
+				out = append(out, hostFlag+"="+c)
+			}
+			return out
+		}
+		if len(prior) > 0 && prior[len(prior)-1] == hostFlag {
+			return Clusters(idx, cur)
+		}
+	}
 	switch cmd {
+	case "contexts":
+		return completeContexts(idx, contexts, prior, cur)
 	case "tenant":
 		if len(prior) == 0 && !strings.HasPrefix(cur, "-") {
 			return filter(entries, cur)
@@ -107,7 +140,7 @@ func CompleteWith(idx *index.Index, entries []string, words []string) []string {
 func firstName(prior []string) bool {
 	for i := 0; i < len(prior); i++ {
 		w := prior[i]
-		if w == tenantFlag {
+		if w == tenantFlag || w == hostFlag {
 			i++ // its value is not a cluster name
 			continue
 		}
@@ -167,4 +200,25 @@ func filter(in []string, prefix string) []string {
 		}
 	}
 	return out
+}
+
+// completeContexts completes `contexts <sub> ...`.
+func completeContexts(idx *index.Index, contexts, prior []string, cur string) []string {
+	if len(prior) == 0 {
+		if strings.HasPrefix(cur, "-") {
+			return nil
+		}
+		return filter(contextSubs, cur)
+	}
+	sub := prior[0]
+	if strings.HasPrefix(cur, "-") {
+		return filter(contextFlags[sub], cur)
+	}
+	switch sub {
+	case "add":
+		return Clusters(idx, cur)
+	case "remove":
+		return filter(contexts, cur)
+	}
+	return nil
 }

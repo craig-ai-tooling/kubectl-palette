@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -48,5 +49,36 @@ func TestHookEvalsExport(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "real kubectl get ns kc=/x/it's.yaml") {
 		t.Fatalf("output: %s", out)
+	}
+}
+
+func TestHookEvalsUnset(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("no bash")
+	}
+	dir := t.TempDir()
+	// The fake plugin prints what the real one prints for `use --unset --print-env`, and
+	// records its arguments so the test can see the hook passed the flag through.
+	argsFile := dir + "/args"
+	if err := writeExec(dir+"/kubectl-palette", "#!/bin/sh\necho \"$*\" > "+argsFile+"\necho '"+UnsetKubeconfig+"'\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeExec(dir+"/kubectl", "#!/bin/sh\necho \"real kubectl kc=[$KUBECONFIG]\"\n"); err != nil {
+		t.Fatal(err)
+	}
+	hookSrc, _ := Init("bash")
+	cmd := exec.Command(bash, "-c", hookSrc+"\nexport KUBECONFIG=/x/pinned.yaml\nkubectl palette use --unset\nkubectl get ns\n")
+	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if !strings.Contains(string(out), "real kubectl kc=[]") {
+		t.Fatalf("KUBECONFIG was not unset: %s", out)
+	}
+	got, _ := os.ReadFile(argsFile)
+	if strings.TrimSpace(string(got)) != "use --unset --print-env" {
+		t.Fatalf("plugin arguments: %q", got)
 	}
 }

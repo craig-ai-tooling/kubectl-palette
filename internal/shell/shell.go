@@ -12,6 +12,9 @@ func Quote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + 
 // ExportKubeconfig is the line the hook evals.
 func ExportKubeconfig(path string) string { return "export KUBECONFIG=" + Quote(path) }
 
+// UnsetKubeconfig is the line `use --unset` prints for the hook to eval.
+const UnsetKubeconfig = "unset KUBECONFIG"
+
 // hook wraps kubectl so `kubectl palette use` can change this shell's KUBECONFIG, which a
 // child process cannot do. Everything else goes to the real kubectl untouched.
 const hook = `kubectl() {
