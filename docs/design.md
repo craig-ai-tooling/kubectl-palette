@@ -90,10 +90,33 @@ When.
   that file, so changing `KUBECTL_PALETTE_CONTEXT_FILE` never lets old records claim entries
   in the new file.
 
-Why `use` stays. It points `KUBECONFIG` at one per-cluster file the plugin owns, so a
-terminal pinned to a cluster cannot drift: no `use-context` elsewhere and no edit of the
-shared file changes it. A context in a shared file can change under a running session.
-Both are kept: `use` for a terminal that must not drift, contexts for everything else.
+How `use` pins a terminal (since 11/19/26). The first version pointed `KUBECONFIG` at the
+cluster's own file, so in that terminal `kubectl config get-contexts` showed one context
+and the recorded contexts were out of sight. Found on the first macOS run. Now `use`
+records the context, then writes a terminal pin, `<root KubeDir>/.terminals/<16 hex>.yaml`,
+that holds only `current-context`, and exports `KUBECONFIG=<pin>:<context file>[:<other
+files the user listed>]`. kubectl takes `current-context` from the first file that sets
+it and writes a `current-context` change to the first file in the list, so:
+
+- `get-contexts` lists every context, with `*` on the terminal's own.
+- `kubectl config use-context` in the terminal rewrites its pin only. Other terminals and
+  the shared file's `current-context` do not move. A pinned terminal cannot drift through
+  another terminal's `use-context`.
+- A later `use` finds the pin at the head of `KUBECONFIG` and rewrites it, so a terminal
+  keeps one pin. Cluster files and other pins under the kube directory are dropped from the
+  list; other user files are kept after the context file.
+- `current` reads the pin and maps the context back to tenant, project and cluster through
+  the registry.
+- A context deleted from the file by hand is added again on the next `use`.
+- `logout` does not remove pins. Pins are never deleted automatically: kubectl skips a
+  missing `KUBECONFIG` file silently, so deleting an open terminal's pin would move that
+  terminal to the global `current-context` without a word. A pin is about 150 bytes.
+- `--admin`, `--no-context`, contexts turned off, or a failure to record the context fall
+  back to the cluster file, as before. Admin credentials never reach a shared file.
+- A change to the context entry itself (`kubectl config set-context --current
+  --namespace x`) is written where the context lives, the shared file, and affects every
+  terminal that uses that context. That is ordinary kubectl behavior.
+
 `use --unset` prints `unset KUBECONFIG`, which the shell hook evals.
 
 What a context depends on. Each call runs `kubectl-palette token`, so it needs the plugin

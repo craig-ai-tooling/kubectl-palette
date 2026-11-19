@@ -650,14 +650,23 @@ func (a *App) use(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stderr, "fetched kubeconfig for %s\n", c.Ref())
 	}
 	fmt.Fprintf(a.Stderr, "using %s%s (%s)\n", a.entryPrefix(), c.Ref(), mode)
+	kc := path
 	if !*admin && !*noContext {
-		a.recordContext(c, path, fetched)
+		// The terminal will list the context file itself, so the $KUBECONFIG note is moot.
+		a.envNoted = true
+		if name := a.recordContext(c, path, fetched); name != "" {
+			if v, perr := a.pinTerminal(name); perr != nil {
+				a.warnf("could not pin this terminal to context %s, using the cluster file: %v", name, perr)
+			} else {
+				kc = v
+			}
+		}
 	}
 	if !fresh {
 		a.maybeBackgroundSync(idx)
 	}
 	if a.shouldPrintEnv(*printEnv) {
-		fmt.Fprintln(a.Stdout, shell.ExportKubeconfig(path))
+		fmt.Fprintln(a.Stdout, shell.ExportKubeconfig(kc))
 		return nil
 	}
 	if a.SpawnShell == nil {
@@ -665,7 +674,7 @@ func (a *App) use(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintln(a.Stderr, "no shell hook installed, starting a subshell (exit to leave). See: kubectl palette shell-init")
 	fmt.Fprintln(a.Stderr, "(if kubectl is an alias in your shell, load the hook after the alias)")
-	return a.SpawnShell(path)
+	return a.SpawnShell(kc)
 }
 
 // unsetKubeconfig is `use --unset`. The shell hook evals what it prints, so this terminal
@@ -836,6 +845,9 @@ func (a *App) execCmd(ctx context.Context, args []string) int {
 // is <project>/<cluster>.yaml and a named entry's is .tenants/<entry>/<project>/....
 func (a *App) current() error {
 	kc := a.Getenv("KUBECONFIG")
+	if pin := a.terminalPin(kc); pin != "" {
+		return a.currentPinned(pin, kc)
+	}
 	kube := a.Paths.Root().KubeDir
 	rel, err := filepath.Rel(kube, kc)
 	if kc == "" || err != nil || strings.Contains(kc, string(os.PathListSeparator)) || strings.HasPrefix(rel, "..") {
@@ -876,8 +888,8 @@ func (a *App) clearClusterFiles(adminOnly bool) (admin int, errs []error) {
 		return 0, []error{err}
 	}
 	for _, pd := range projects {
-		if !pd.IsDir() || pd.Name() == config.TenantKubeDir {
-			continue // named entries own that directory and are removed by their own logout
+		if !pd.IsDir() || pd.Name() == config.TenantKubeDir || pd.Name() == config.TerminalDir {
+			continue // named entries own .tenants; .terminals holds no credentials
 		}
 		dir := filepath.Join(a.Paths.KubeDir, pd.Name())
 		ents, err := os.ReadDir(dir)

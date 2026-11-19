@@ -89,7 +89,7 @@ func TestPickNumberedUsesWholeInput(t *testing.T) {
 	h.a.StdinIsTTY = true
 	h.a.Stdin = strings.NewReader("2-prod\n")
 	code, out, e := h.run("use", "--print-env", "--no-fuzzy")
-	if code != 0 || !strings.Contains(out, "2-prod.yaml") {
+	if code != 0 || h.target(t, out) != "2-prod" {
 		t.Fatalf("2-prod chose the wrong cluster: %d %q %s", code, out, e)
 	}
 	h.a.Stdin = strings.NewReader("2\n")

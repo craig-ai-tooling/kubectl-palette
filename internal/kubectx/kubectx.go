@@ -806,3 +806,23 @@ func Lookup(kubeconfigPath, registryPath string, tenant, uid string) (Record, bo
 	}
 	return Record{}, false, nil
 }
+
+// HasContext reports whether the kubeconfig at path defines a context with this name. A
+// missing or unreadable file has none.
+func HasContext(path, name string) bool {
+	cfg, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		return false
+	}
+	_, ok := cfg.Contexts[name]
+	return ok
+}
+
+// CurrentContext returns the current-context of the kubeconfig at path.
+func CurrentContext(path string) (string, error) {
+	cfg, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		return "", err
+	}
+	return cfg.CurrentContext, nil
+}

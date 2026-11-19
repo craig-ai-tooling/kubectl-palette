@@ -154,9 +154,24 @@ kubectl palette contexts prune                # drop clusters Palette no longer 
 kubectl --context web get pods                # any terminal, no plugin command needed
 ```
 
-`use` still pins one terminal. It points `KUBECONFIG` at that cluster's own file, so
-that terminal cannot drift to another cluster. The contexts serve every other terminal.
-`kubectl palette use --unset` puts a pinned terminal back on your own kubeconfig.
+`use` sets the current context of one terminal only. It points `KUBECONFIG` at a small
+per-terminal file that holds only `current-context`, followed by your kubeconfig:
+
+```
+KUBECONFIG=~/.kube/palette/.terminals/<id>.yaml:~/.kube/config
+```
+
+In that terminal `kubectl config get-contexts` lists every context with `*` on the one in
+use, and `kubectl config use-context <name>` switches that terminal only. Other terminals
+and the `current-context` in your kubeconfig do not change. A later `use` in the same
+terminal rewrites the same file. Other files you had in `KUBECONFIG` stay in the list.
+`kubectl palette current` names the cluster behind the terminal's context.
+`kubectl palette use --unset` puts the terminal back on your own kubeconfig.
+
+With `--admin`, `--no-context` or contexts turned off, `use` points `KUBECONFIG` at the
+cluster's own file instead, as before. The per-terminal files hold no credentials and are
+not deleted automatically: kubectl skips a missing file without a word, so deleting the
+file of an open terminal would move it to your global context.
 
 `logout` removes the tenant's contexts. `logout --keep-contexts` leaves them and
 `logout --all` removes every one for the current context file, also when no tenant is saved.
