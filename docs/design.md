@@ -110,10 +110,11 @@ it and writes a `current-context` change to the first file in the list, so:
   release) every `use` makes a new pin. Pins and cluster files are dropped from the list;
   other user files are kept after the context file.
 - kubectl, `aws eks update-kubeconfig`, kind and similar tools write new entries to the
-  first file in `KUBECONFIG`, the pin. `use` rewrites the pin in place: it sets
-  `current-context` and keeps everything else, and prints a note naming what else the pin
-  holds. `use --unset` prints the same note. Those entries are visible only in that
-  terminal.
+  first file in `KUBECONFIG`, the pin. A pin holding anything besides `current-context` is
+  never rewritten: it may carry that tool's credentials, which the plugin must not write
+  (security rule 1), and an entry in it named like the Palette context would override the
+  Palette one, since the pin is first. `use` leaves it, starts a new pin, and names what
+  stays behind. `use --unset` names it too.
 - `current` reads the pin and maps the context back to tenant, project and cluster through
   the registry.
 - A context deleted from the file by hand is added again on the next `use`. A context the

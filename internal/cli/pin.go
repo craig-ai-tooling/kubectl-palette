@@ -31,8 +31,10 @@ import (
 // this terminal changes only this terminal.
 //
 // kubectl and other tools (aws eks update-kubeconfig, kind) also write NEW entries to the
-// first file in the list. `use` therefore rewrites the pin in place and keeps whatever else
-// it holds, and says so, instead of replacing it.
+// first file in the list. `use` never rewrites a pin that holds anything besides its
+// current-context: such a pin can carry another tool's credentials, and a context or cluster
+// in it named like the Palette context would override the Palette one. `use` leaves that file
+// as it is, starts a new pin, and names what stays behind.
 //
 // A pin belongs to one shell: its name starts with the PID the shell hook passes in
 // KUBECTL_PALETTE_SHELL. A later `use` reuses the pin only when that PID matches, so tmux
@@ -114,24 +116,24 @@ func extraNames(cfg *api.Config) []string {
 	return out
 }
 
-// writePin sets current-context in the pin and keeps everything else it holds.
-func writePin(pin, name string) (extra []string, err error) {
+// pinExtras returns what an existing pin holds besides its current-context. A missing pin
+// holds nothing. An unreadable one is reported as holding something, so it is left alone.
+func pinExtras(pin string) []string {
 	cfg, err := clientcmd.LoadFromFile(pin)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		cfg = api.NewConfig()
+		return nil
 	case err != nil:
-		return nil, fmt.Errorf("read %s: %w", pin, err)
+		return []string{"content kubectl cannot read"}
 	}
-	cfg.CurrentContext = name
-	b, err := clientcmd.Write(*cfg)
-	if err != nil {
-		return nil, err
-	}
-	if err := config.WriteFileAtomic(pin, b); err != nil {
-		return nil, err
-	}
-	return extraNames(cfg), nil
+	return extraNames(cfg)
+}
+
+// writePin writes a pin that holds only a current-context. It never carries anything else.
+func writePin(pin, name string) error {
+	body := fmt.Sprintf("# kubectl-palette: the current context of one terminal. See: kubectl palette current\n"+
+		"apiVersion: v1\nkind: Config\ncurrent-context: %q\n", name)
+	return config.WriteFileAtomic(pin, []byte(body))
 }
 
 // pinTerminal points this terminal at context name and returns the $KUBECONFIG value to
@@ -139,6 +141,13 @@ func writePin(pin, name string) (extra []string, err error) {
 func (a *App) pinTerminal(name string) (string, error) {
 	kc := a.getenv("KUBECONFIG")
 	pin := a.ownPin(kc)
+	if pin != "" {
+		if extra := pinExtras(pin); len(extra) > 0 {
+			fmt.Fprintf(a.Stderr, "note: %s holds %s, added while this terminal was pinned. It stays in that file; this terminal no longer lists it.\n",
+				shortPath(pin), strings.Join(extra, ", "))
+			pin = ""
+		}
+	}
 	if pin == "" {
 		p, err := newPinPath(a.terminalDir(), a.getenv(EnvShellPID))
 		if err != nil {
@@ -146,13 +155,8 @@ func (a *App) pinTerminal(name string) (string, error) {
 		}
 		pin = p
 	}
-	extra, err := writePin(pin, name)
-	if err != nil {
+	if err := writePin(pin, name); err != nil {
 		return "", err
-	}
-	if len(extra) > 0 {
-		fmt.Fprintf(a.Stderr, "note: this terminal's file %s also holds %s, added while the terminal was pinned. Only this terminal sees them.\n",
-			shortPath(pin), strings.Join(extra, ", "))
 	}
 	file := absOr(a.Paths.ContextFile())
 	list := []string{pin, file}
@@ -196,7 +200,7 @@ func (a *App) noteUnpinnedExtras() {
 		return
 	}
 	if extra := extraNames(cfg); len(extra) > 0 {
-		fmt.Fprintf(a.Stderr, "note: %s holds %s, added while the terminal was pinned. They stay in that file.\n",
+		fmt.Fprintf(a.Stderr, "note: %s holds %s, added while the terminal was pinned. It stays in that file.\n",
 			shortPath(pin), strings.Join(extra, ", "))
 	}
 }

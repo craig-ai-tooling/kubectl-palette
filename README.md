@@ -170,9 +170,9 @@ same shell rewrites the same file. Other files you had in `KUBECONFIG` stay in t
 
 kubectl writes new entries to the first file in `KUBECONFIG`. A cluster added in a pinned
 terminal (`aws eks update-kubeconfig`, `kubectl config set-context`) lands in that
-terminal's file and only that terminal sees it. `use` keeps such entries and prints a note
-naming them. Run those tools after `kubectl palette use --unset` to put them in your
-kubeconfig.
+terminal's file and only that terminal sees it. The next `use` leaves that file as it is,
+starts a new one and names what stayed behind. Run those tools after
+`kubectl palette use --unset` to put them in your kubeconfig.
 
 With `--admin`, `--no-context` or contexts turned off, `use` points `KUBECONFIG` at the
 cluster's own file instead, as before. The per-terminal files hold no credentials of their

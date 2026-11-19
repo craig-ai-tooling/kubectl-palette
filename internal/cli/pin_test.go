@@ -193,9 +193,11 @@ func TestInheritedPinIsNotShared(t *testing.T) {
 	}
 }
 
-// Review finding: kubectl and other tools write new entries to the first file in
-// $KUBECONFIG, the pin. A later use keeps them and says so.
-func TestPinKeepsEntriesOtherToolsAdded(t *testing.T) {
+// Review findings: kubectl and other tools write new entries to the first file in
+// $KUBECONFIG, the pin. Such a pin may carry their credentials, and an entry named like the
+// Palette context would override it. A later use leaves the file alone, starts a new pin and
+// names what stays behind.
+func TestPinWithOtherEntriesIsLeftAlone(t *testing.T) {
 	h := ctxHarness(t)
 	h.env[EnvShellPID] = "300"
 	kc := exportValue(t, h.mustRunOut(t, "use", "alpha", "--print-env"))
@@ -204,26 +206,39 @@ func TestPinKeepsEntriesOtherToolsAdded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Another tool adds its cluster, and one named like the Palette context "beta".
 	cfg.Clusters["eks"] = &api.Cluster{Server: "https://eks.example"}
 	cfg.AuthInfos["eks"] = &api.AuthInfo{Token: "x"}
 	cfg.Contexts["eks"] = &api.Context{Cluster: "eks", AuthInfo: "eks"}
+	cfg.Contexts["beta"] = &api.Context{Cluster: "eks", AuthInfo: "eks"}
 	if err := clientcmd.WriteToFile(*cfg, pin); err != nil {
 		t.Fatal(err)
 	}
+	before, _ := os.ReadFile(pin)
 	h.env["KUBECONFIG"] = kc
-	code, out, e := h.run("use", "beta", "--print-env")
-	if code != 0 || filepath.SplitList(exportValue(t, out))[0] != pin {
-		t.Fatalf("%d %q %s", code, out, e)
-	}
-	got, err := clientcmd.LoadFromFile(pin)
-	if err != nil || got.CurrentContext != "beta" || got.Contexts["eks"] == nil || got.Clusters["eks"] == nil || got.AuthInfos["eks"] == nil {
-		t.Fatalf("entries lost or context not set: %+v %v", got, err)
-	}
-	if !strings.Contains(e, "also holds cluster eks, context eks, user eks") {
-		t.Fatalf("no note: %s", e)
-	}
-	if _, _, e = h.run("use", "--unset", "--print-env"); !strings.Contains(e, "context eks") {
+	if _, _, e := h.run("use", "--unset", "--print-env"); !strings.Contains(e, "context eks") {
 		t.Fatalf("--unset gave no note: %s", e)
+	}
+	code, out, e := h.run("use", "beta", "--print-env")
+	if code != 0 {
+		t.Fatalf("%d %s", code, e)
+	}
+	kc2 := exportValue(t, out)
+	newPin := filepath.SplitList(kc2)[0]
+	if newPin == pin || strings.Contains(kc2, pin) {
+		t.Fatalf("the pin with other entries was reused or kept in the list: %q", kc2)
+	}
+	if after, _ := os.ReadFile(pin); string(after) != string(before) {
+		t.Fatal("the pin with other entries was rewritten")
+	}
+	if b, _ := os.ReadFile(newPin); strings.Contains(string(b), "eks") || strings.Contains(string(b), "token") {
+		t.Fatalf("new pin carries other entries:\n%s", b)
+	}
+	if h.targetOf(t, kc2) != "beta" {
+		t.Fatalf("new pin selects %q", h.targetOf(t, kc2))
+	}
+	if !strings.Contains(e, "holds cluster eks, context beta, context eks, user eks") || !strings.Contains(e, "no longer lists it") {
+		t.Fatalf("no note: %s", e)
 	}
 }
 
