@@ -580,7 +580,7 @@ func TestUseHost(t *testing.T) {
 	h.setClusters(virtualClusters())
 	h.mustRun(t, "sync")
 	code, out, e := h.run("use", "vc1", "--host", "host", "--print-env")
-	if code != 0 || !strings.Contains(out, "vc1.yaml") {
+	if code != 0 || h.target(t, out) != "vc1" {
 		t.Fatalf("%d %q %s", code, out, e)
 	}
 	// a cluster the host does not host is not found, even though it exists
@@ -599,7 +599,7 @@ func TestUseHost(t *testing.T) {
 	var items []picker.Item
 	h.a.Pick = func(in []picker.Item) (int, error) { items = in; return 1, nil }
 	code, out, e = h.run("use", "--host", "Default/host", "--print-env")
-	if code != 0 || len(items) != 2 || !strings.Contains(out, "vc2.yaml") {
+	if code != 0 || len(items) != 2 || h.target(t, out) != "vc2" {
 		t.Fatalf("%d %q %s items=%d", code, out, e, len(items))
 	}
 }

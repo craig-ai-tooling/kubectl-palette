@@ -225,7 +225,7 @@ func TestNamedEntryClusterFilesAndExecArgs(t *testing.T) {
 		t.Fatalf("%d %s", code, e)
 	}
 	want := filepath.Join(h.a.Paths.KubeDir, ".tenants", "acme", "Default", "alpha.yaml")
-	if !strings.Contains(out, want) || !strings.Contains(e, "using acme: Default/alpha (oidc)") {
+	if h.target(t, out) != "alpha" || !strings.Contains(e, "using acme: Default/alpha (oidc)") {
 		t.Fatalf("out %q err %q, want path %s", out, e, want)
 	}
 	b, err := os.ReadFile(want)
@@ -572,7 +572,7 @@ func TestLegacyFlatStateNeedsNoMigration(t *testing.T) {
 	h.f.mu.Lock()
 	h.f.issuers["rt-0"] = newIss.URL // the clusters trust the issuer just logged in to
 	h.f.mu.Unlock()
-	if code, out, _ := h.run("use", "alpha", "--print-env"); code != 0 || !strings.Contains(out, filepath.Join(root.KubeDir, "Default", "alpha.yaml")) {
+	if code, out, _ := h.run("use", "alpha", "--print-env"); code != 0 || h.target(t, out) != "alpha" {
 		t.Fatalf("%d %s", code, out)
 	}
 	// Flat files written before tenants existed are used as they are: a flat config with no

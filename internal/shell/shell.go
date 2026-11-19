@@ -26,7 +26,7 @@ const UnsetKubeconfig = "unset KUBECONFIG"
 const body = `function kubectl {
   if [ "$1" = "palette" ] && [ "$2" = "use" ]; then
     local _kp_out
-    _kp_out="$(command kubectl-palette use "${@:3}" --print-env)" || return $?
+    _kp_out="$(KUBECTL_PALETTE_SHELL=$$ command kubectl-palette use "${@:3}" --print-env)" || return $?
     eval "$_kp_out"
   elif [ -n "${_kp_kubectl_alias-}" ]; then
     (unset -f kubectl; eval "$_kp_kubectl_alias \"\$@\"")

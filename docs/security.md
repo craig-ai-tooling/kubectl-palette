@@ -14,8 +14,11 @@ file paths.
   `kubectl-palette token` as an exec credential plugin and holds no token.
 - `kubeconfig.Rewrite` takes a `RewriteOptions` struct, so a secret can never be passed
   where the tenant goes.
-- Per-terminal files live under `~/.kube/palette/`. The user's own kubeconfig is touched
-  only through `internal/kubectx` (rule 3b), never by any other code path.
+- Cached cluster files live under `~/.kube/palette/`. Terminal pins live under the plugin
+  home (`~/.config/kubectl-palette/terminals/`, mode 700 directory, mode 600 files) and hold
+  only a `current-context`. A pin that holds anything else (another tool wrote to it) is
+  never rewritten; `use` starts a new one. The user's own kubeconfig is touched only
+  through `internal/kubectx` (rule 3b), never by any other code path.
 
 ### 2. File modes
 - The token cache and any admin kubeconfig are mode 600, under the user's home.

@@ -90,10 +90,46 @@ When.
   that file, so changing `KUBECTL_PALETTE_CONTEXT_FILE` never lets old records claim entries
   in the new file.
 
-Why `use` stays. It points `KUBECONFIG` at one per-cluster file the plugin owns, so a
-terminal pinned to a cluster cannot drift: no `use-context` elsewhere and no edit of the
-shared file changes it. A context in a shared file can change under a running session.
-Both are kept: `use` for a terminal that must not drift, contexts for everything else.
+How `use` pins a terminal (since 11/19/26). The first version pointed `KUBECONFIG` at the
+cluster's own file, so in that terminal `kubectl config get-contexts` showed one context
+and the recorded contexts were out of sight. Found on the first macOS run. Now `use`
+records the context, then writes a terminal pin,
+`<root Home>/terminals/<shell pid>-<16 hex>.yaml`, that sets `current-context`, and exports
+`KUBECONFIG=<pin>:<context file>[:<other files the user listed>]`. Pins live under the
+plugin home, not the kube directory, so no project name can collide with them. kubectl takes `current-context` from the first file that sets
+it and writes a `current-context` change to the first file in the list, so:
+
+- `get-contexts` lists every context, with `*` on the terminal's own.
+- `kubectl config use-context` in the terminal rewrites its pin only. Other terminals and
+  the shared file's `current-context` do not move. A pinned terminal cannot drift through
+  another terminal's `use-context`.
+- The shell hook passes the shell's PID in `KUBECTL_PALETTE_SHELL`. A later `use` reuses
+  the pin at the head of `KUBECONFIG` only when its name starts with that PID. tmux panes
+  and child shells inherit `KUBECONFIG` but have another PID, so each gets its own pin and
+  none switches another. Without the variable (no hook, or a hook loaded from an older
+  release) every `use` makes a new pin. Pins and cluster files are dropped from the list;
+  other user files are kept after the context file.
+- kubectl, `aws eks update-kubeconfig`, kind and similar tools write new entries to the
+  first file in `KUBECONFIG`, the pin. A pin holding anything besides `current-context` is
+  never rewritten: it may carry that tool's credentials, which the plugin must not write
+  (security rule 1), and an entry in it named like the Palette context would override the
+  Palette one, since the pin is first. `use` leaves it, starts a new pin, and names what
+  stays behind. `use --unset` names it too.
+- `current` reads the pin and maps the context back to tenant, project and cluster through
+  the registry.
+- A context deleted from the file by hand is added again on the next `use`. A context the
+  user re-pointed at another cluster or user is left alone: the warm path checks that the
+  context still points at the plugin's cluster entry and user, and otherwise records the
+  cluster under a free name, so `use` never selects someone else's cluster.
+- `logout` does not remove pins. Pins are never deleted automatically: kubectl skips a
+  missing `KUBECONFIG` file silently, so deleting an open terminal's pin would move that
+  terminal to the global `current-context` without a word. A pin is about 150 bytes.
+- `--admin`, `--no-context`, contexts turned off, or a failure to record the context fall
+  back to the cluster file, as before. Admin credentials never reach a shared file.
+- A change to the context entry itself (`kubectl config set-context --current
+  --namespace x`) is written where the context lives, the shared file, and affects every
+  terminal that uses that context. That is ordinary kubectl behavior.
+
 `use --unset` prints `unset KUBECONFIG`, which the shell hook evals.
 
 What a context depends on. Each call runs `kubectl-palette token`, so it needs the plugin

@@ -163,10 +163,10 @@ func TestNoteWhenKubeconfigEnvHidesContextFile(t *testing.T) {
 	const note = "$KUBECONFIG is set"
 	h := ctxHarness(t)
 	h.env["KUBECONFIG"] = filepath.Join(t.TempDir(), "elsewhere")
-	if e := h.mustRun(t, "use", "alpha", "--print-env"); !strings.Contains(e, note) {
+	if e := h.mustRun(t, "contexts", "add", "alpha"); !strings.Contains(e, note) {
 		t.Fatalf("no note: %s", e)
 	}
-	if e := h.mustRun(t, "use", "beta", "--print-env"); strings.Contains(e, note) {
+	if e := h.mustRun(t, "contexts", "add", "beta"); strings.Contains(e, note) {
 		t.Fatalf("note printed twice: %s", e)
 	}
 	for name, env := range map[string]func(h *harness) string{

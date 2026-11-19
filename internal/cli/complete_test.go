@@ -131,7 +131,7 @@ func TestUseFuzzyPickerAndFallbacks(t *testing.T) {
 	var items []picker.Item
 	h.a.Pick = func(in []picker.Item) (int, error) { items = in; return 2, nil }
 	code, out, e := h.run("use", "--print-env")
-	if code != 0 || !strings.Contains(out, "plain.yaml") {
+	if code != 0 || h.target(t, out) != "plain" {
 		t.Fatalf("%d %q %s", code, out, e)
 	}
 	joined := items[0].Label + "|" + items[1].Label + "|" + items[2].Label
@@ -151,14 +151,14 @@ func TestUseFuzzyPickerAndFallbacks(t *testing.T) {
 	h.a.Pick = func([]picker.Item) (int, error) { return -1, errors.New("no tty") }
 	h.a.Stdin = strings.NewReader("1\n")
 	code, out, e = h.run("use", "--print-env")
-	if code != 0 || !strings.Contains(out, "alpha.yaml") || !strings.Contains(e, "numbered list") {
+	if code != 0 || h.target(t, out) != "alpha" || !strings.Contains(e, "numbered list") {
 		t.Fatalf("%d %q %s", code, out, e)
 	}
 
 	// --no-fuzzy never calls the finder.
 	h.a.Pick = func([]picker.Item) (int, error) { t.Fatal("finder must not run"); return 0, nil }
 	h.a.Stdin = strings.NewReader("3\n")
-	if code, out, _ = h.run("use", "--print-env", "--no-fuzzy"); code != 0 || !strings.Contains(out, "plain.yaml") {
+	if code, out, _ = h.run("use", "--print-env", "--no-fuzzy"); code != 0 || h.target(t, out) != "plain" {
 		t.Fatalf("%d %q", code, out)
 	}
 }

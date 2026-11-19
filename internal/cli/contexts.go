@@ -63,35 +63,38 @@ func (a *App) ctxEntry(c index.Cluster) kubectx.Entry {
 	return kubectx.Entry{Tenant: a.Paths.Entry(), Project: c.Project, Cluster: c.Name, UID: c.UID, IssuerID: a.entryIssuerID()}
 }
 
-// recordContext adds one cluster to the user's kubeconfig as a context. path is the
-// cluster's OIDC file and fetched says whether this call downloaded it. It does nothing
-// when the cluster already has a record and the file is unchanged, so a warm use writes
-// no file. A failure is a warning, never an error: the command that called it already
-// did its job. Admin mode must not call this.
-func (a *App) recordContext(c index.Cluster, path string, fetched bool) {
+// recordContext adds one cluster to the user's kubeconfig as a context and returns the
+// context name, "" when there is none. path is the cluster's OIDC file and fetched says
+// whether this call downloaded it. A warm use with the context still in the file, as
+// written, writes nothing. A context the user removed or re-pointed is written again, under
+// a free name when the old one is taken, so `use` never selects someone else's cluster. A failure is a
+// warning, never an error: the command that called it already did its job. Admin mode must
+// not call this.
+func (a *App) recordContext(c index.Cluster, path string, fetched bool) string {
 	if !a.contextsEnabled() {
-		return
+		return ""
 	}
 	entry := a.Paths.Entry()
 	reg, file := a.Paths.ContextRegistry(), a.Paths.ContextFile()
-	_, had, err := kubectx.Lookup(file, reg, entry, c.UID)
-	if err == nil && had && !fetched {
-		return
+	old, had, err := kubectx.Lookup(file, reg, entry, c.UID)
+	if err == nil && had && !fetched && kubectx.OwnsContext(file, old) {
+		return old.Context
 	}
 	src, err := os.ReadFile(path)
 	if err != nil {
 		a.warnf("could not add a context for %s: %v", c.Ref(), err)
-		return
+		return ""
 	}
 	rec, err := kubectx.Upsert(file, reg, a.ctxEntry(c), src, a.now())
 	if err != nil {
 		a.warnf("could not add a context for %s: %v", c.Ref(), err)
-		return
+		return ""
 	}
 	if !had {
 		fmt.Fprintf(a.Stderr, "added context %s to %s\n", rec.Context, shortPath(file))
 		a.noteKubeconfigEnv()
 	}
+	return rec.Context
 }
 
 // noteKubeconfigEnv prints one note when a context was added to a file the shell's

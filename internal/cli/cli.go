@@ -650,14 +650,23 @@ func (a *App) use(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stderr, "fetched kubeconfig for %s\n", c.Ref())
 	}
 	fmt.Fprintf(a.Stderr, "using %s%s (%s)\n", a.entryPrefix(), c.Ref(), mode)
+	kc := path
 	if !*admin && !*noContext {
-		a.recordContext(c, path, fetched)
+		// The terminal will list the context file itself, so the $KUBECONFIG note is moot.
+		a.envNoted = true
+		if name := a.recordContext(c, path, fetched); name != "" {
+			if v, perr := a.pinTerminal(name); perr != nil {
+				a.warnf("could not pin this terminal to context %s, using the cluster file: %v", name, perr)
+			} else {
+				kc = v
+			}
+		}
 	}
 	if !fresh {
 		a.maybeBackgroundSync(idx)
 	}
 	if a.shouldPrintEnv(*printEnv) {
-		fmt.Fprintln(a.Stdout, shell.ExportKubeconfig(path))
+		fmt.Fprintln(a.Stdout, shell.ExportKubeconfig(kc))
 		return nil
 	}
 	if a.SpawnShell == nil {
@@ -665,13 +674,14 @@ func (a *App) use(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintln(a.Stderr, "no shell hook installed, starting a subshell (exit to leave). See: kubectl palette shell-init")
 	fmt.Fprintln(a.Stderr, "(if kubectl is an alias in your shell, load the hook after the alias)")
-	return a.SpawnShell(path)
+	return a.SpawnShell(kc)
 }
 
 // unsetKubeconfig is `use --unset`. The shell hook evals what it prints, so this terminal
 // goes back to the user's own kubeconfig. Without the hook there is nothing to eval.
 func (a *App) unsetKubeconfig(flagPrint bool) error {
 	if a.shouldPrintEnv(flagPrint) {
+		a.noteUnpinnedExtras()
 		fmt.Fprintln(a.Stdout, shell.UnsetKubeconfig)
 		fmt.Fprintln(a.Stderr, "this terminal uses your own kubeconfig again")
 		return nil
@@ -836,6 +846,9 @@ func (a *App) execCmd(ctx context.Context, args []string) int {
 // is <project>/<cluster>.yaml and a named entry's is .tenants/<entry>/<project>/....
 func (a *App) current() error {
 	kc := a.Getenv("KUBECONFIG")
+	if pin := a.terminalPin(kc); pin != "" {
+		return a.currentPinned(pin, kc)
+	}
 	kube := a.Paths.Root().KubeDir
 	rel, err := filepath.Rel(kube, kc)
 	if kc == "" || err != nil || strings.Contains(kc, string(os.PathListSeparator)) || strings.HasPrefix(rel, "..") {

@@ -192,7 +192,7 @@ func TestUseColdThenWarm(t *testing.T) {
 		t.Fatalf("code %d: %s", code, errs)
 	}
 	path := filepath.Join(h.a.Paths.KubeDir, "Default", "alpha.yaml")
-	if strings.TrimSpace(out) != "export KUBECONFIG='"+path+"'" {
+	if h.target(t, out) != "alpha" {
 		t.Fatalf("stdout = %q", out)
 	}
 	fi, err := os.Stat(path)
@@ -217,7 +217,7 @@ func TestUseColdThenWarm(t *testing.T) {
 	if code != 0 || h.f.total() != before {
 		t.Fatalf("warm use made API calls: %v", h.f.hits)
 	}
-	if !strings.Contains(out, path) {
+	if h.target(t, out) != "alpha" {
 		t.Fatalf("warm stdout = %q", out)
 	}
 }
@@ -427,7 +427,7 @@ func TestUsePicker(t *testing.T) {
 	h.a.StdinIsTTY = true
 	h.a.Stdin = strings.NewReader("2\n")
 	code, out, e := h.run("use", "--print-env", "--no-fuzzy")
-	if code != 0 || !strings.Contains(out, "beta.yaml") || !strings.Contains(e, "1  Default/alpha") {
+	if code != 0 || h.target(t, out) != "beta" || !strings.Contains(e, "1  Default/alpha") {
 		t.Fatalf("%d %q %q", code, out, e)
 	}
 	h.a.StdinIsTTY = false
@@ -440,7 +440,7 @@ func TestUseSingleClusterAutoSelects(t *testing.T) {
 	h := newHarness(t, time.Now().Add(time.Hour))
 	h.f.clusters = `[{"name":"only","uid":"uo","annotations":{"projectUid":"p1"}}]`
 	code, out, e := h.run("use", "--print-env")
-	if code != 0 || !strings.Contains(out, "only.yaml") {
+	if code != 0 || h.target(t, out) != "only" {
 		t.Fatalf("%d %q %s", code, out, e)
 	}
 }
@@ -451,7 +451,7 @@ func TestUseWithoutHookSpawnsShell(t *testing.T) {
 	var got string
 	h.a.SpawnShell = func(p string) error { got = p; return nil }
 	code, out, _ := h.run("use", "alpha")
-	if code != 0 || out != "" || !strings.HasSuffix(got, "alpha.yaml") {
+	if code != 0 || out != "" || h.targetOf(t, got) != "alpha" {
 		t.Fatalf("%d %q %q", code, out, got)
 	}
 }
