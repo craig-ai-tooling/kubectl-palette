@@ -93,6 +93,9 @@ func TestHookWithKubectlAlias(t *testing.T) {
 		{"none", "", "real kubectl get ns"},
 		{"other command", "alias kubectl=kubecolor", "kubecolor|real kubectl get ns"},
 		{"kubectl with flags", "alias kubectl='kubectl --request-timeout=5s'", "real kubectl --request-timeout=5s get ns"},
+		{"env prefix", "alias kubectl='KP_T=1 kubectl'", "real kubectl get ns t=1"},
+		{"backslash", `alias kubectl='\kubectl -v1'`, "real kubectl -v1 get ns"},
+		{"env command", "alias kubectl='env KP_T=1 kubectl'", "real kubectl get ns t=1"},
 	}
 	for _, sh := range []string{"bash", "zsh"} {
 		bin, err := exec.LookPath(sh)
@@ -109,7 +112,7 @@ func TestHookWithKubectlAlias(t *testing.T) {
 					}
 				}
 				write("kubectl-palette", "#!/bin/sh\necho \"export KUBECONFIG=/x/c.yaml\"\n")
-				write("kubectl", "#!/bin/sh\necho \"real kubectl $*\"\n")
+				write("kubectl", "#!/bin/sh\necho \"real kubectl $*${KP_T:+ t=$KP_T}\"\n")
 				write("kubecolor", "#!/bin/sh\nprintf 'kubecolor|'\nexec kubectl \"$@\"\n")
 				hookSrc, _ := Init(sh)
 				if err := os.WriteFile(dir+"/hook", []byte(hookSrc), 0o600); err != nil {

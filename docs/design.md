@@ -33,8 +33,9 @@ kubectl palette current | sync | logout
   subshell. `exec` needs neither. The hook is a `kubectl` shell function defined with
   `function kubectl {`, because zsh expands an alias in the `kubectl() {` form. A
   `kubectl` alias set before the hook is removed, kept in `_kp_kubectl_alias`, and run for
-  every other kubectl command; an alias whose text starts with `kubectl` runs as
-  `command kubectl ...` so it does not recurse. An alias set after the hook hides it, and
+  every other kubectl command. It runs in a subshell with the function removed, so an
+  alias that itself calls kubectl (`kubectl --context x`, `AWS_PROFILE=p kubectl`) reaches
+  the binary and does not recurse. An alias set after the hook hides it, and
   `use` then falls back to the subshell.
 - Duplicate cluster names across projects resolve as `project/cluster`.
 - With exactly one cluster in the index, `login` selects it.

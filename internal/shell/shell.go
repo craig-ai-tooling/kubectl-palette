@@ -29,21 +29,19 @@ const body = `function kubectl {
     _kp_out="$(command kubectl-palette use "${@:3}" --print-env)" || return $?
     eval "$_kp_out"
   elif [ -n "${_kp_kubectl_alias-}" ]; then
-    eval "$_kp_kubectl_alias \"\$@\""
+    (unset -f kubectl; eval "$_kp_kubectl_alias \"\$@\"")
   else
     command kubectl "$@"
   fi
 }
 `
 
-// keepAlias reads the alias into _kp_kubectl_alias and removes it. An alias that starts with
-// kubectl itself (alias kubectl='kubectl --context x') is run as `command kubectl ...` so it
-// does not call this function again. Loading the hook twice keeps the first alias.
+// keepAlias reads the alias into _kp_kubectl_alias and removes it. The alias runs in a
+// subshell with this function removed, so any form that ends up at kubectl
+// (alias kubectl='kubectl --context x', 'AWS_PROFILE=p kubectl', '\kubectl') reaches the
+// real binary instead of calling the hook again. Loading the hook twice keeps the first alias.
 const keepAlias = `if [ -n "$_kp_alias_now" ]; then
   _kp_kubectl_alias="$_kp_alias_now"
-  case "$_kp_kubectl_alias" in
-    kubectl|"kubectl "*) _kp_kubectl_alias="command $_kp_kubectl_alias" ;;
-  esac
   unalias kubectl
 fi
 unset _kp_alias_now
