@@ -82,3 +82,78 @@ func TestHookEvalsUnset(t *testing.T) {
 		t.Fatalf("plugin arguments: %q", got)
 	}
 }
+
+// TestHookWithKubectlAlias loads the hook from an interactive shell that already has a kubectl
+// alias, the way an rc file does. zsh used to fail with "defining function based on alias" and
+// a parse error, and bash with a syntax error when the alias had arguments.
+func TestHookWithKubectlAlias(t *testing.T) {
+	cases := []struct {
+		name, alias, want string
+	}{
+		{"none", "", "real kubectl get ns"},
+		{"other command", "alias kubectl=kubecolor", "kubecolor|real kubectl get ns"},
+		{"kubectl with flags", "alias kubectl='kubectl --request-timeout=5s'", "real kubectl --request-timeout=5s get ns"},
+		{"env prefix", "alias kubectl='KP_T=1 kubectl'", "real kubectl get ns t=1"},
+		{"backslash", `alias kubectl='\kubectl -v1'`, "real kubectl -v1 get ns"},
+		{"env command", "alias kubectl='env KP_T=1 kubectl'", "real kubectl get ns t=1"},
+	}
+	for _, sh := range []string{"bash", "zsh"} {
+		bin, err := exec.LookPath(sh)
+		if err != nil {
+			t.Logf("%s not installed, skipped", sh)
+			continue
+		}
+		for _, c := range cases {
+			for _, twice := range []bool{false, true} {
+				dir := t.TempDir()
+				write := func(name, body string) {
+					if err := writeExec(dir+"/"+name, body); err != nil {
+						t.Fatal(err)
+					}
+				}
+				write("kubectl-palette", "#!/bin/sh\necho \"export KUBECONFIG=/x/c.yaml\"\n")
+				write("kubectl", "#!/bin/sh\necho \"real kubectl $*${KP_T:+ t=$KP_T}\"\n")
+				write("kubecolor", "#!/bin/sh\nprintf 'kubecolor|'\nexec kubectl \"$@\"\n")
+				hookSrc, _ := Init(sh)
+				if err := os.WriteFile(dir+"/hook", []byte(hookSrc), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				load := "eval \"$(cat " + dir + "/hook)\"\n"
+				if twice {
+					load += load
+				}
+				// The alias and the hook are read in one source step, as from an rc file, and
+				// the commands run afterwards, as typed at the prompt.
+				rc := c.alias + "\n" + load
+				if err := os.WriteFile(dir+"/rc", []byte(rc), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				script := "source " + dir + "/rc\nkubectl palette use foo\necho \"KC=$KUBECONFIG\"\nkubectl get ns\n"
+				args := []string{"-c", script}
+				if sh == "bash" {
+					args = []string{"--norc", "--noprofile", "-c", "shopt -s expand_aliases\n" + script}
+				} else {
+					args = []string{"-f", "-c", script}
+				}
+				cmd := exec.Command(bin, args...)
+				cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "HOME=" + dir}
+				out, err := cmd.CombinedOutput()
+				label := sh + "/" + c.name
+				if twice {
+					label += "/twice"
+				}
+				if err != nil {
+					t.Errorf("%s: %v: %s", label, err, out)
+					continue
+				}
+				s := string(out)
+				if !strings.Contains(s, "KC=/x/c.yaml") || !strings.Contains(s, c.want) {
+					t.Errorf("%s: want KC=/x/c.yaml and %q in:\n%s", label, c.want, s)
+				}
+				if strings.Contains(s, "parse error") || strings.Contains(s, "syntax error") || strings.Contains(s, "based on alias") {
+					t.Errorf("%s: shell error:\n%s", label, s)
+				}
+			}
+		}
+	}
+}

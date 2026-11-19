@@ -664,6 +664,7 @@ func (a *App) use(ctx context.Context, args []string) error {
 		return errors.New("no shell to start; use the shell hook: eval \"$(kubectl-palette shell-init bash)\"")
 	}
 	fmt.Fprintln(a.Stderr, "no shell hook installed, starting a subshell (exit to leave). See: kubectl palette shell-init")
+	fmt.Fprintln(a.Stderr, "(if kubectl is an alias in your shell, load the hook after the alias)")
 	return a.SpawnShell(path)
 }
 

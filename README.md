@@ -92,6 +92,10 @@ Install the shell hook once (zsh or bash). Without it, `use` opens a subshell.
 eval "$(kubectl-palette shell-init zsh)"     # put this in ~/.zshrc
 ```
 
+If `kubectl` is an alias in your shell (for example `alias kubectl=kubecolor`), put the
+hook line after the alias. The hook takes over the alias and still runs it for every
+command other than `kubectl palette use`.
+
 Turn on tab completion of cluster names (kubectl 1.26 or newer). This puts a
 `kubectl_complete-palette` link next to the binary; kubectl runs it to complete
 `kubectl palette use <TAB>` and `kubectl palette exec <TAB>` from the local index, with no

@@ -123,6 +123,10 @@ jobs:
       - name: Install
         run: go mod download
 
+      - name: Install zsh
+        # The shell hook tests run under bash and zsh. They skip a shell that is missing.
+        run: command -v zsh >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq zsh)
+
       - name: Lint
         run: test -z "$(gofmt -l .)"
 
