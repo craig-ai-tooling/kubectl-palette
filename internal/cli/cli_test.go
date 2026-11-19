@@ -458,7 +458,7 @@ func TestUseWithoutHookSpawnsShell(t *testing.T) {
 
 func TestShellInitAndUsage(t *testing.T) {
 	h := newHarness(t, time.Now().Add(time.Hour))
-	if code, out, _ := h.run("shell-init", "zsh"); code != 0 || !strings.Contains(out, "kubectl()") {
+	if code, out, _ := h.run("shell-init", "zsh"); code != 0 || !strings.Contains(out, "function kubectl {") {
 		t.Fatal(out)
 	}
 	if code, _, _ := h.run("shell-init", "fish"); code == 0 {
