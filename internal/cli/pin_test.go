@@ -242,6 +242,30 @@ func TestPinWithOtherEntriesIsLeftAlone(t *testing.T) {
 	}
 }
 
+// Review finding: preferences or extensions in a pin count as other content too.
+func TestPinWithPreferencesIsLeftAlone(t *testing.T) {
+	h := ctxHarness(t)
+	h.env[EnvShellPID] = "400"
+	kc := exportValue(t, h.mustRunOut(t, "use", "alpha", "--print-env"))
+	pin := filepath.SplitList(kc)[0]
+	cfg, err := clientcmd.LoadFromFile(pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Preferences.Colors = true
+	if err := clientcmd.WriteToFile(*cfg, pin); err != nil {
+		t.Fatal(err)
+	}
+	h.env["KUBECONFIG"] = kc
+	code, out, e := h.run("use", "beta", "--print-env")
+	if code != 0 || filepath.SplitList(exportValue(t, out))[0] == pin || !strings.Contains(e, "holds preferences") {
+		t.Fatalf("%d %q %s", code, out, e)
+	}
+	if got, _ := clientcmd.LoadFromFile(pin); got == nil || !got.Preferences.Colors {
+		t.Fatal("preferences were dropped")
+	}
+}
+
 // Review finding: a recorded context the user re-pointed must not be selected on a warm use.
 func TestWarmUseIgnoresRepointedContext(t *testing.T) {
 	h := ctxHarness(t)

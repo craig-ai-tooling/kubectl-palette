@@ -112,6 +112,12 @@ func extraNames(cfg *api.Config) []string {
 	for n := range cfg.AuthInfos {
 		out = append(out, "user "+n)
 	}
+	if len(cfg.Extensions) > 0 {
+		out = append(out, "extensions")
+	}
+	if cfg.Preferences.Colors || len(cfg.Preferences.Extensions) > 0 {
+		out = append(out, "preferences")
+	}
 	sort.Strings(out)
 	return out
 }
