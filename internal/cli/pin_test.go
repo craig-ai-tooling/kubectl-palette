@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/clientcmd/api"
+
 	"github.com/craig-ai-tooling/kubectl-palette/internal/config"
 	"github.com/craig-ai-tooling/kubectl-palette/internal/kubectx"
 	"github.com/craig-ai-tooling/kubectl-palette/internal/shell"
@@ -54,6 +57,7 @@ func (h *harness) target(t *testing.T, out string) string {
 
 func TestUsePinsTerminalToRecordedContext(t *testing.T) {
 	h := ctxHarness(t)
+	h.env[EnvShellPID] = "4242"
 	ctxFile := ctxFileOf(t, h)
 	out := h.mustRunOut(t, "use", "alpha", "--print-env")
 	kc := exportValue(t, out)
@@ -69,7 +73,7 @@ func TestUsePinsTerminalToRecordedContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"token", "client-key", "certificate", "server:", "users:"} {
+	for _, bad := range []string{"token", "client-key", "certificate", "server:", "exec"} {
 		if strings.Contains(string(b), bad) {
 			t.Errorf("pin holds %q:\n%s", bad, b)
 		}
@@ -100,6 +104,7 @@ func TestUsePinsTerminalToRecordedContext(t *testing.T) {
 
 	// A new terminal gets its own pin.
 	delete(h.env, "KUBECONFIG")
+	h.env[EnvShellPID] = "4343"
 	kc3 := exportValue(t, h.mustRunOut(t, "use", "alpha", "--print-env"))
 	if filepath.SplitList(kc3)[0] == pin {
 		t.Fatal("a terminal without a pin reused another terminal's pin")
@@ -161,5 +166,84 @@ func TestPinExportQuotes(t *testing.T) {
 	line := shell.ExportKubeconfig("/a b/p.yaml" + string(os.PathListSeparator) + "/c/it's")
 	if !strings.HasPrefix(line, "export KUBECONFIG='/a b/p.yaml") {
 		t.Fatal(line)
+	}
+}
+
+// Review finding: tmux panes and child shells inherit $KUBECONFIG. A pin belongs to the shell
+// whose PID made it, so another shell gets its own and never switches the first.
+func TestInheritedPinIsNotShared(t *testing.T) {
+	h := ctxHarness(t)
+	h.env[EnvShellPID] = "100"
+	kcA := exportValue(t, h.mustRunOut(t, "use", "alpha", "--print-env"))
+	pinA := filepath.SplitList(kcA)[0]
+	h.env["KUBECONFIG"] = kcA // pane B inherits pane A's environment
+	h.env[EnvShellPID] = "200"
+	kcB := exportValue(t, h.mustRunOut(t, "use", "beta", "--print-env"))
+	if filepath.SplitList(kcB)[0] == pinA {
+		t.Fatal("pane B rewrote pane A's pin")
+	}
+	if got, _ := kubectx.CurrentContext(pinA); got != "alpha" {
+		t.Fatalf("pane A switched to %q", got)
+	}
+	// Without the hook's variable nothing is reused either.
+	delete(h.env, EnvShellPID)
+	h.env["KUBECONFIG"] = kcA
+	if kc := exportValue(t, h.mustRunOut(t, "use", "beta", "--print-env")); filepath.SplitList(kc)[0] == pinA {
+		t.Fatal("a shell without the hook variable reused a pin")
+	}
+}
+
+// Review finding: kubectl and other tools write new entries to the first file in
+// $KUBECONFIG, the pin. A later use keeps them and says so.
+func TestPinKeepsEntriesOtherToolsAdded(t *testing.T) {
+	h := ctxHarness(t)
+	h.env[EnvShellPID] = "300"
+	kc := exportValue(t, h.mustRunOut(t, "use", "alpha", "--print-env"))
+	pin := filepath.SplitList(kc)[0]
+	cfg, err := clientcmd.LoadFromFile(pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Clusters["eks"] = &api.Cluster{Server: "https://eks.example"}
+	cfg.AuthInfos["eks"] = &api.AuthInfo{Token: "x"}
+	cfg.Contexts["eks"] = &api.Context{Cluster: "eks", AuthInfo: "eks"}
+	if err := clientcmd.WriteToFile(*cfg, pin); err != nil {
+		t.Fatal(err)
+	}
+	h.env["KUBECONFIG"] = kc
+	code, out, e := h.run("use", "beta", "--print-env")
+	if code != 0 || filepath.SplitList(exportValue(t, out))[0] != pin {
+		t.Fatalf("%d %q %s", code, out, e)
+	}
+	got, err := clientcmd.LoadFromFile(pin)
+	if err != nil || got.CurrentContext != "beta" || got.Contexts["eks"] == nil || got.Clusters["eks"] == nil || got.AuthInfos["eks"] == nil {
+		t.Fatalf("entries lost or context not set: %+v %v", got, err)
+	}
+	if !strings.Contains(e, "also holds cluster eks, context eks, user eks") {
+		t.Fatalf("no note: %s", e)
+	}
+	if _, _, e = h.run("use", "--unset", "--print-env"); !strings.Contains(e, "context eks") {
+		t.Fatalf("--unset gave no note: %s", e)
+	}
+}
+
+// Review finding: a recorded context the user re-pointed must not be selected on a warm use.
+func TestWarmUseIgnoresRepointedContext(t *testing.T) {
+	h := ctxHarness(t)
+	h.mustRunOut(t, "use", "alpha", "--print-env")
+	cfg := h.kube(t)
+	cfg.Clusters["mine"] = &api.Cluster{Server: "https://mine.example"}
+	cfg.Contexts["alpha"].Cluster = "mine"
+	writeKube(t, h, cfg)
+	name := h.target(t, h.mustRunOut(t, "use", "alpha", "--print-env"))
+	if name == "alpha" {
+		t.Fatal("warm use selected the re-pointed context")
+	}
+	k := h.kube(t)
+	if c := k.Contexts[name]; c == nil || c.Cluster != name {
+		t.Fatalf("pinned to %q, which is not the plugin's context: %+v", name, c)
+	}
+	if k.Contexts["alpha"].Cluster != "mine" {
+		t.Fatal("the user's re-pointed context was changed")
 	}
 }

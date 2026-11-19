@@ -61,7 +61,7 @@ func TestHookEvalsUnset(t *testing.T) {
 	// The fake plugin prints what the real one prints for `use --unset --print-env`, and
 	// records its arguments so the test can see the hook passed the flag through.
 	argsFile := dir + "/args"
-	if err := writeExec(dir+"/kubectl-palette", "#!/bin/sh\necho \"$*\" > "+argsFile+"\necho '"+UnsetKubeconfig+"'\n"); err != nil {
+	if err := writeExec(dir+"/kubectl-palette", "#!/bin/sh\necho \"$* pid=$KUBECTL_PALETTE_SHELL\" > "+argsFile+"\necho '"+UnsetKubeconfig+"'\n"); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeExec(dir+"/kubectl", "#!/bin/sh\necho \"real kubectl kc=[$KUBECONFIG]\"\n"); err != nil {
@@ -78,7 +78,7 @@ func TestHookEvalsUnset(t *testing.T) {
 		t.Fatalf("KUBECONFIG was not unset: %s", out)
 	}
 	got, _ := os.ReadFile(argsFile)
-	if strings.TrimSpace(string(got)) != "use --unset --print-env" {
+	if !strings.HasPrefix(strings.TrimSpace(string(got)), "use --unset --print-env pid=") || strings.HasSuffix(strings.TrimSpace(string(got)), "pid=") {
 		t.Fatalf("plugin arguments: %q", got)
 	}
 }

@@ -65,8 +65,9 @@ func (a *App) ctxEntry(c index.Cluster) kubectx.Entry {
 
 // recordContext adds one cluster to the user's kubeconfig as a context and returns the
 // context name, "" when there is none. path is the cluster's OIDC file and fetched says
-// whether this call downloaded it. A warm use with the context still in the file writes
-// nothing. A context the user removed from the file by hand is added again. A failure is a
+// whether this call downloaded it. A warm use with the context still in the file, as
+// written, writes nothing. A context the user removed or re-pointed is written again, under
+// a free name when the old one is taken, so `use` never selects someone else's cluster. A failure is a
 // warning, never an error: the command that called it already did its job. Admin mode must
 // not call this.
 func (a *App) recordContext(c index.Cluster, path string, fetched bool) string {
@@ -76,7 +77,7 @@ func (a *App) recordContext(c index.Cluster, path string, fetched bool) string {
 	entry := a.Paths.Entry()
 	reg, file := a.Paths.ContextRegistry(), a.Paths.ContextFile()
 	old, had, err := kubectx.Lookup(file, reg, entry, c.UID)
-	if err == nil && had && !fetched && kubectx.HasContext(file, old.Context) {
+	if err == nil && had && !fetched && kubectx.OwnsContext(file, old) {
 		return old.Context
 	}
 	src, err := os.ReadFile(path)

@@ -42,10 +42,6 @@ const TenantsDir = "tenants"
 // entries. It cannot be a project name, so the two layouts never share a path.
 const TenantKubeDir = ".tenants"
 
-// TerminalDir is the subdirectory of the root KubeDir that holds one small kubeconfig per
-// terminal, which sets only that terminal's current context. It cannot be a project name.
-const TerminalDir = ".terminals"
-
 // Paths locates every file the plugin owns. Home and KubeDir point at the selected
 // tenant entry once ForTenant has been applied. Without it they are the flat default layout.
 type Paths struct {

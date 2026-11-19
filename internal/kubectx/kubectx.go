@@ -807,15 +807,16 @@ func Lookup(kubeconfigPath, registryPath string, tenant, uid string) (Record, bo
 	return Record{}, false, nil
 }
 
-// HasContext reports whether the kubeconfig at path defines a context with this name. A
-// missing or unreadable file has none.
-func HasContext(path, name string) bool {
+// OwnsContext reports whether the kubeconfig at path still holds the record's context as
+// written: present, pointing at the record's cluster entry and user. A context the user
+// re-pointed or deleted is not owned. A missing or unreadable file owns nothing.
+func OwnsContext(path string, r Record) bool {
 	cfg, err := clientcmd.LoadFromFile(path)
 	if err != nil {
 		return false
 	}
-	_, ok := cfg.Contexts[name]
-	return ok
+	c := cfg.Contexts[r.Context]
+	return c != nil && cfg.Clusters[r.Context] != nil && c.Cluster == r.Context && c.AuthInfo == r.User
 }
 
 // CurrentContext returns the current-context of the kubeconfig at path.

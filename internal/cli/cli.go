@@ -681,6 +681,7 @@ func (a *App) use(ctx context.Context, args []string) error {
 // goes back to the user's own kubeconfig. Without the hook there is nothing to eval.
 func (a *App) unsetKubeconfig(flagPrint bool) error {
 	if a.shouldPrintEnv(flagPrint) {
+		a.noteUnpinnedExtras()
 		fmt.Fprintln(a.Stdout, shell.UnsetKubeconfig)
 		fmt.Fprintln(a.Stderr, "this terminal uses your own kubeconfig again")
 		return nil
@@ -888,8 +889,8 @@ func (a *App) clearClusterFiles(adminOnly bool) (admin int, errs []error) {
 		return 0, []error{err}
 	}
 	for _, pd := range projects {
-		if !pd.IsDir() || pd.Name() == config.TenantKubeDir || pd.Name() == config.TerminalDir {
-			continue // named entries own .tenants; .terminals holds no credentials
+		if !pd.IsDir() || pd.Name() == config.TenantKubeDir {
+			continue // named entries own that directory and are removed by their own logout
 		}
 		dir := filepath.Join(a.Paths.KubeDir, pd.Name())
 		ents, err := os.ReadDir(dir)
