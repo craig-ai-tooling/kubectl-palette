@@ -70,6 +70,12 @@ file paths.
   server host, the root domain or a subdomain of the root domain, else the login stops.
 - Logout of a named entry removes its whole directory, including the config, and clears
   `<Home>/active` if it pointed there.
+- When Palette rejects a session, `token`, `use` and `sync` may run the browser login again
+  for that same entry, from its saved config. Only when stderr is a terminal, a browser can
+  be opened and `KUBECTL_PALETTE_NO_AUTO_LOGIN` is unset; never with no session (after
+  `logout`). The new login must come back from the saved issuer or nothing is saved. Only
+  the session and the issuer's endpoints are written. Logins hold `<entry>/login.lock`, so
+  concurrent calls open one browser.
 
 ### 3b. The context file
 `internal/kubectx` adds contexts to the user's kubeconfig (`~/.kube/config` by default).

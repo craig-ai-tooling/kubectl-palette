@@ -33,7 +33,7 @@ const StaleGrace = 10 * time.Second
 var ErrNoSession = errors.New("no valid session: run: kubectl palette login")
 
 // ErrSessionGone is returned by a Refresher when the issuer rejects the refresh token.
-var ErrSessionGone = errors.New("session expired: run: kubectl palette login")
+var ErrSessionGone = errors.New("Palette session expired: run: kubectl palette login")
 
 // Session is what is persisted.
 type Session struct {

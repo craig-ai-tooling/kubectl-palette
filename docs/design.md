@@ -363,7 +363,10 @@ using kubelogin v1.36.4 and one browser login.
 3. Clusters on a customer's own IdP instead of Palette as IdP: cluster access works
    through that IdP, but the API session above does not exist, so the index needs an
    API key.
-4. Refresh-token behavior after 4 hours idle, and with tenant SSO or MFA enforced.
+4. Whether Palette caps a session's total length however often it is renewed, and the
+   refresh-token behavior with tenant SSO or MFA enforced. After 4 hours idle the issuer
+   rejects the refresh token (seen 11/20/26 on a session idle 44 hours); `token`, `use` and
+   `sync` then run the browser login again when someone is at a terminal.
 5. Contexts and the no-browser paths were tested against fakes only. Not verified: macOS,
    Windows, zsh (the hook is tested under bash), self-hosted and dedicated installs,
    virtual clusters with OIDC, and the real browser login through `--server`.
