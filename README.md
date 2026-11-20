@@ -208,7 +208,16 @@ A context keeps working while the login session does. Each `kubectl --context` c
 `kubectl-palette token`, which needs the plugin on PATH and a valid session. With Palette
 as the identity provider a token lasts up to 60 minutes, and renewing it needs Palette.
 Contexts remove the need to look clusters up in Palette. They do not remove the need for
-Palette to issue tokens. When the session is gone, run `kubectl palette login`.
+Palette to issue tokens.
+
+The session renews itself while it is used. Palette issues a 60 minute ID token and a 4
+hour refresh token, and each renewal resets the 4 hours. After 4 hours unused, the next
+kubectl call or `use` opens the browser login by itself, waits up to 2 minutes, and
+carries on. One login renews every terminal and context; nothing else changes. It opens a
+browser only when kubectl's stderr is a terminal and a browser can be opened (not over ssh,
+not on Linux without a display), and never after a `logout`. Turn it off with
+`KUBECTL_PALETTE_NO_AUTO_LOGIN=1`. Otherwise the call fails with
+`Palette session expired: run: kubectl palette login`.
 
 ## No browser
 

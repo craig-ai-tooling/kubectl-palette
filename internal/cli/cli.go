@@ -43,6 +43,9 @@ type App struct {
 
 	StdoutIsTTY bool
 	StdinIsTTY  bool
+	// StderrIsTTY means a person is likely watching: an expired session then opens the
+	// browser login instead of failing.
+	StderrIsTTY bool
 
 	OpenBrowser func(url string) error
 	// SpawnSync starts a detached background index refresh for a tenant entry. The entry is
@@ -131,9 +134,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	case "tenant":
 		err = a.tenantCmd(rest)
 	case "sync":
-		err = a.sync(ctx, rest)
+		err = a.retryAfterLogin(ctx, root, func() error { return a.sync(ctx, rest) })
 	case "use":
-		err = a.use(ctx, rest)
+		err = a.retryAfterLogin(ctx, root, func() error { return a.use(ctx, rest) })
 	case "exec":
 		return a.execCmd(ctx, rest)
 	case "contexts":
@@ -285,9 +288,18 @@ func (a *App) token(ctx context.Context, args []string) error {
 		}
 	}
 	tok, exp, err := a.sessionMgr().IDToken(ctx)
+	if rt, ok := session.Rejected(err); ok && a.canAutoLogin() {
+		if lerr := a.relogin(ctx, rt); lerr != nil {
+			return fmt.Errorf("%v (%w)", a.sessionExpired(), lerr)
+		}
+		tok, exp, err = a.sessionMgr().IDToken(ctx)
+	}
 	if err != nil {
-		if errors.Is(err, config.ErrNoConfig) || errors.Is(err, session.ErrNoSession) || errors.Is(err, session.ErrSessionGone) {
-			return errors.New("run: " + a.loginHint())
+		switch {
+		case errors.Is(err, session.ErrSessionGone):
+			return a.sessionExpired()
+		case errors.Is(err, config.ErrNoConfig) || errors.Is(err, session.ErrNoSession):
+			return errors.New("not logged in: run: " + a.loginHint())
 		}
 		return err
 	}
@@ -414,7 +426,7 @@ func (a *App) resolve(ctx context.Context, idx *index.Index, fresh bool, name, h
 	if (errors.Is(err, index.ErrNotFound) || errors.As(err, &nv)) && !fresh {
 		nidx, berr := a.buildIndex(ctx)
 		if berr != nil {
-			return cl, idx, false, fmt.Errorf("%w (refreshing the index failed: %v)", err, berr)
+			return cl, idx, false, fmt.Errorf("%w (refreshing the index failed: %w)", err, berr)
 		}
 		cl, err = find(nidx)
 		return cl, nidx, true, err

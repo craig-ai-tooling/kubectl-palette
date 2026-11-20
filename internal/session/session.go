@@ -33,7 +33,23 @@ const StaleGrace = 10 * time.Second
 var ErrNoSession = errors.New("no valid session: run: kubectl palette login")
 
 // ErrSessionGone is returned by a Refresher when the issuer rejects the refresh token.
-var ErrSessionGone = errors.New("session expired: run: kubectl palette login")
+var ErrSessionGone = errors.New("Palette session expired: run: kubectl palette login")
+
+// GoneError is ErrSessionGone naming the refresh token the issuer rejected, so a caller can
+// tell whether the stored session has been replaced since.
+type GoneError struct{ RefreshToken string }
+
+func (e *GoneError) Error() string        { return ErrSessionGone.Error() }
+func (e *GoneError) Is(target error) bool { return target == ErrSessionGone }
+
+// Rejected returns the refresh token that err says the issuer rejected.
+func Rejected(err error) (string, bool) {
+	var g *GoneError
+	if errors.As(err, &g) {
+		return g.RefreshToken, true
+	}
+	return "", false
+}
 
 // Session is what is persisted.
 type Session struct {
@@ -188,7 +204,7 @@ func (m *Manager) refresh(ctx context.Context, staleRefresh string) (Session, er
 	id, rt, err := m.Refresher.Refresh(ctx, s.RefreshToken)
 	if err != nil {
 		if errors.Is(err, ErrSessionGone) {
-			return s, ErrSessionGone
+			return s, &GoneError{RefreshToken: s.RefreshToken}
 		}
 		return s, fmt.Errorf("refresh session: %w", err)
 	}

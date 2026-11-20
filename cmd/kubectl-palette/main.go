@@ -30,7 +30,7 @@ func main() {
 	app := &cli.App{
 		Version: version, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
 		Getenv: os.Getenv, Paths: paths,
-		StdoutIsTTY: cli.IsTTY(os.Stdout), StdinIsTTY: cli.IsTTY(os.Stdin),
+		StdoutIsTTY: cli.IsTTY(os.Stdout), StdinIsTTY: cli.IsTTY(os.Stdin), StderrIsTTY: cli.IsTTY(os.Stderr),
 		OpenBrowser: cli.OpenBrowserDefault,
 		SpawnSync:   func(tenant string) error { return cli.SpawnBackgroundSync(self, tenant) },
 		RunKubectl:  cli.RunKubectlDefault,

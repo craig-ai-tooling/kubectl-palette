@@ -22,3 +22,4 @@ is a signal that something needs a real design change rather than a fifth patch.
 <!-- Append below. Do not edit or reorder existing entries. -->
 
 - 2026-11-18 — kubectl-palette initialized from ai-project-template.
+- 2026-11-20 — an expired session failed every kubectl call with a bare "run: kubectl palette login"; token, use and sync now say the session expired and open the browser login when stderr is a terminal (KUBECTL_PALETTE_NO_AUTO_LOGIN=1 turns it off).

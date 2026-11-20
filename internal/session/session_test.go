@@ -278,3 +278,15 @@ func TestSuccessfulRefreshStillReplacesToken(t *testing.T) {
 		t.Fatalf("token not replaced: %v", err)
 	}
 }
+
+func TestRejectedNamesTheSpentRefreshToken(t *testing.T) {
+	m, _, _ := staleSetup(t, -time.Minute, ErrSessionGone)
+	_, _, err := m.IDToken(context.Background())
+	rt, ok := Rejected(err)
+	if !errors.Is(err, ErrSessionGone) || !ok || rt == "" {
+		t.Fatalf("%v %q %v", err, rt, ok)
+	}
+	if s, _ := m.Load(); s.RefreshToken != rt {
+		t.Fatalf("rejected %q, stored %q", rt, s.RefreshToken)
+	}
+}
