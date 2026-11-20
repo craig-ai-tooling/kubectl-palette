@@ -76,21 +76,28 @@ func (a *App) relogin(ctx context.Context, rejected string) error {
 	}
 	// A logout while the browser was open wins. logout deletes the session under the
 	// session lock, so check and save under it too. Check the config first as well, so a
-	// removed named entry does not get its directory back just for a lock file.
+	// removed named entry does not get its directory back just for a lock file. Only a
+	// missing file means logout; any other read error is returned as it is.
 	loggedOut := errors.New("log in again: the tenant was logged out meanwhile; nothing saved")
-	if _, err := a.Paths.Load(); err != nil {
+	if _, err := a.Paths.Load(); errors.Is(err, config.ErrNoConfig) {
 		return loggedOut
+	} else if err != nil {
+		return fmt.Errorf("log in again: %w", err)
 	}
 	slk, err := session.LockFile(a.Paths.SessionLock())
 	if err != nil {
 		return fmt.Errorf("lock session: %w", err)
 	}
 	defer slk.Unlock()
-	if _, err := a.Paths.Load(); err != nil {
+	if _, err := a.Paths.Load(); errors.Is(err, config.ErrNoConfig) {
 		return loggedOut
+	} else if err != nil {
+		return fmt.Errorf("log in again: %w", err)
 	}
 	if _, err := m.Load(); errors.Is(err, session.ErrNoSession) {
 		return loggedOut
+	} else if err != nil {
+		return fmt.Errorf("log in again: %w", err)
 	}
 	if err := a.Paths.Save(got); err != nil {
 		return err
@@ -110,13 +117,13 @@ func (a *App) retryAfterLogin(ctx context.Context, root config.Paths, cmd func()
 	if !errors.Is(err, session.ErrSessionGone) || !a.canAutoLogin() {
 		return err
 	}
-	// cmd left a.Paths on the entry whose session was rejected. A rejected renewal leaves
-	// the stored pair as it was, so the stored refresh token is the rejected one.
-	s, lerr := a.sessionMgr().Load()
-	if lerr == nil {
-		lerr = a.relogin(ctx, s.RefreshToken)
+	// cmd left a.Paths on the entry whose session was rejected. The error names the
+	// refresh token that was rejected; another process may have replaced it since.
+	rt, ok := session.Rejected(err)
+	if !ok {
+		return err
 	}
-	if lerr != nil {
+	if lerr := a.relogin(ctx, rt); lerr != nil {
 		return fmt.Errorf("%v (%w)", err, lerr)
 	}
 	a.Paths = root

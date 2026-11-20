@@ -287,10 +287,9 @@ func (a *App) token(ctx context.Context, args []string) error {
 			return issuerMismatchErr(a.Paths.Entry())
 		}
 	}
-	before, _ := a.sessionMgr().Load()
 	tok, exp, err := a.sessionMgr().IDToken(ctx)
-	if errors.Is(err, session.ErrSessionGone) && a.canAutoLogin() {
-		if lerr := a.relogin(ctx, before.RefreshToken); lerr != nil {
+	if rt, ok := session.Rejected(err); ok && a.canAutoLogin() {
+		if lerr := a.relogin(ctx, rt); lerr != nil {
 			return fmt.Errorf("%v (%w)", a.sessionExpired(), lerr)
 		}
 		tok, exp, err = a.sessionMgr().IDToken(ctx)

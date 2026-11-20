@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -238,5 +239,45 @@ func TestReloginAfterConcurrentLogoutSavesNothing(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Review finding: another process can log in after this command's request was rejected
+// and before the command returns. The rejected token travels in the error, so the
+// replacement is recognised and no second browser opens.
+func TestRetryUsesTheTokenTheRequestSawRejected(t *testing.T) {
+	h, calls := expiredHarness(t)
+	root := h.a.Paths
+	runs := 0
+	err := h.a.retryAfterLogin(context.Background(), root, func() error {
+		runs++
+		if runs == 1 {
+			// The other terminal finishes its login before this command returns.
+			exp := time.Now().Add(time.Hour)
+			if err := h.a.sessionMgr().Save(session.Session{IDToken: jwtExp(exp, "other"), RefreshToken: "rt-other", IDExpiry: exp}); err != nil {
+				t.Fatal(err)
+			}
+			return fmt.Errorf("fetch cluster index: %w", &session.GoneError{RefreshToken: "rt-0"})
+		}
+		return nil
+	})
+	if err != nil || runs != 2 || len(*calls) != 0 {
+		t.Fatalf("err %v runs %d logins %d", err, runs, len(*calls))
+	}
+}
+
+// Review finding: only a missing file means logout. Other read errors keep their cause.
+func TestReloginReportsUnreadableConfig(t *testing.T) {
+	h, _ := expiredHarness(t)
+	h.a.Login = func(_ context.Context, o oidc.LoginOptions) (session.Session, config.Config, error) {
+		if err := os.WriteFile(h.a.Paths.ConfigFile(), []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		exp := time.Now().Add(time.Hour)
+		return session.Session{IDToken: jwtExp(exp, "x"), RefreshToken: "rt-new", IDExpiry: exp}, o.Cfg, nil
+	}
+	err := h.a.relogin(context.Background(), "rt-0")
+	if err == nil || strings.Contains(err.Error(), "logged out") {
+		t.Fatalf("relogin: %v", err)
 	}
 }
