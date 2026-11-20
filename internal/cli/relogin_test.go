@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -139,15 +140,103 @@ func TestUseExpiredWithoutTerminalFails(t *testing.T) {
 	}
 }
 
-// A second kubectl process that waited on the login lock finds the session renewed and
+// A second kubectl process that waited on the login lock finds a new refresh token and
 // opens no browser of its own.
-func TestReloginSkipsBrowserWhenSessionIsFresh(t *testing.T) {
+func TestReloginSkipsBrowserWhenAnotherProcessLoggedIn(t *testing.T) {
 	h, calls := expiredHarness(t)
-	exp := time.Now().Add(time.Hour)
-	if err := h.a.sessionMgr().Save(session.Session{IDToken: jwtExp(exp, "other"), RefreshToken: "rt-0", IDExpiry: exp}); err != nil {
+	if err := h.a.relogin(context.Background(), "rt-rejected-earlier"); err != nil || len(*calls) != 0 {
+		t.Fatalf("%v logins %d", err, len(*calls))
+	}
+}
+
+// Review finding: Palette can reject the refresh token while the cached ID token is still
+// fresh. The API commands use the refresh token, so the browser login must still run.
+func TestSyncRejectedWithFreshIDTokenLogsInAgain(t *testing.T) {
+	h, calls := expiredHarness(t)
+	exp := time.Now().Add(40 * time.Minute)
+	if err := h.a.sessionMgr().Save(session.Session{IDToken: jwtExp(exp, "fresh"), RefreshToken: "rt-dead", IDExpiry: exp}); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.a.relogin(context.Background()); err != nil || len(*calls) != 0 {
-		t.Fatalf("%v logins %d", err, len(*calls))
+	code, _, e := h.run("sync")
+	if code != 0 || len(*calls) != 1 {
+		t.Fatalf("%d logins %d %s", code, len(*calls), e)
+	}
+	if s, _ := h.a.sessionMgr().Load(); s.RefreshToken != "rt-0" {
+		t.Fatalf("new session not saved: %+v", s)
+	}
+}
+
+// Review finding: `use` of a cluster missing from the cached index refreshes the index.
+// When that refresh hits the expired session, the browser login must still run.
+func TestUseIndexMissWithExpiredSessionLogsInAgain(t *testing.T) {
+	// Build a cached index with a working session, then expire the session.
+	h2, calls2 := expiredHarness(t)
+	h2.f.tokenBody = ""
+	if code, _, e := h2.run("sync"); code != 0 {
+		t.Fatalf("sync %d %s", code, e)
+	}
+	h2.f.tokenBody = `{"error":"invalid_grant"}`
+	if err := h2.a.sessionMgr().Save(session.Session{IDToken: "x.y.z", RefreshToken: "rt-dead", IDExpiry: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	h2.f.mu.Lock()
+	h2.f.clusters = `[{"name":"gamma","uid":"ug","annotations":{"projectUid":"p1","permissions":"cluster.get"}}]`
+	h2.f.mu.Unlock()
+	code, out, e := h2.run("use", "gamma", "--print-env")
+	if code != 0 || h2.target(t, out) != "gamma" || len(*calls2) != 1 {
+		t.Fatalf("%d logins %d %q %s", code, len(*calls2), out, e)
+	}
+}
+
+// Review finding: a logout while the browser is open wins. Nothing is saved afterwards.
+func TestReloginAfterConcurrentLogoutSavesNothing(t *testing.T) {
+	for _, name := range []string{"default", "acme"} {
+		t.Run(name, func(t *testing.T) {
+			h, _ := expiredHarness(t)
+			root := h.a.Paths
+			if name != "default" {
+				cfg, _ := h.a.Paths.Load()
+				h.a.Paths = root.ForTenant(name)
+				if err := h.a.Paths.Save(cfg); err != nil {
+					t.Fatal(err)
+				}
+				if err := h.a.sessionMgr().Save(session.Session{IDToken: "x.y.z", RefreshToken: "rt-dead", IDExpiry: time.Now().Add(-time.Hour)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			entry := h.a.Paths
+			h.a.Login = func(_ context.Context, o oidc.LoginOptions) (session.Session, config.Config, error) {
+				// The user runs logout in another terminal while the browser is open.
+				if _, err := h.a.logoutEntry(root, name, false); err != nil {
+					t.Fatal(err)
+				}
+				h.a.Paths = entry
+				exp := time.Now().Add(time.Hour)
+				return session.Session{IDToken: jwtExp(exp, "x"), RefreshToken: "rt-new", IDExpiry: exp}, o.Cfg, nil
+			}
+			stored, _ := h.a.sessionMgr().Load()
+			loginRan := false
+			inner := h.a.Login
+			h.a.Login = func(ctx context.Context, o oidc.LoginOptions) (session.Session, config.Config, error) {
+				loginRan = true
+				return inner(ctx, o)
+			}
+			err := h.a.relogin(context.Background(), stored.RefreshToken)
+			if !loginRan {
+				t.Fatal("the browser login did not run")
+			}
+			if err == nil || !strings.Contains(err.Error(), "logged out") {
+				t.Fatalf("relogin: %v", err)
+			}
+			h.a.Paths = entry
+			if _, err := h.a.sessionMgr().Load(); !errors.Is(err, session.ErrNoSession) {
+				t.Fatalf("session came back after logout: %v", err)
+			}
+			if name != "default" {
+				if _, err := os.Stat(entry.Home); !os.IsNotExist(err) {
+					t.Fatalf("named entry directory came back: %v", err)
+				}
+			}
+		})
 	}
 }

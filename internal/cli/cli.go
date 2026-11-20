@@ -287,9 +287,10 @@ func (a *App) token(ctx context.Context, args []string) error {
 			return issuerMismatchErr(a.Paths.Entry())
 		}
 	}
+	before, _ := a.sessionMgr().Load()
 	tok, exp, err := a.sessionMgr().IDToken(ctx)
 	if errors.Is(err, session.ErrSessionGone) && a.canAutoLogin() {
-		if lerr := a.relogin(ctx); lerr != nil {
+		if lerr := a.relogin(ctx, before.RefreshToken); lerr != nil {
 			return fmt.Errorf("%v (%w)", a.sessionExpired(), lerr)
 		}
 		tok, exp, err = a.sessionMgr().IDToken(ctx)
@@ -426,7 +427,7 @@ func (a *App) resolve(ctx context.Context, idx *index.Index, fresh bool, name, h
 	if (errors.Is(err, index.ErrNotFound) || errors.As(err, &nv)) && !fresh {
 		nidx, berr := a.buildIndex(ctx)
 		if berr != nil {
-			return cl, idx, false, fmt.Errorf("%w (refreshing the index failed: %v)", err, berr)
+			return cl, idx, false, fmt.Errorf("%w (refreshing the index failed: %w)", err, berr)
 		}
 		cl, err = find(nidx)
 		return cl, nidx, true, err
